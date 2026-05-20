@@ -1,0 +1,24 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# playwright-cli local state + installed skills (re-run `playwright-cli install --skills`)
+.playwright/
+.playwright-cli/
+.claude/
+
+# Copyrighted material — do not redistribute
+voices/
+tts_out/
+pytorch_internals_raw.txt
+pytorch_internals_sentences.txt
+
+# Generated logs
+tts_run.log
