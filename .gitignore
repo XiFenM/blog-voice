@@ -13,7 +13,15 @@ wheels/
 .playwright/
 .playwright-cli/
 .claude/
-
+.opencode/
+.model-cache/
+opencode.json
+**.mp3
+**.lrc
+**.txt
+**.m4a
+**.wav
+.env
 # Copyrighted material — do not redistribute
 voices/
 tts_out/
