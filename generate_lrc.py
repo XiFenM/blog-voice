@@ -1,6 +1,7 @@
 """Generate an LRC file from per-sentence WAV files and sentence text."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
 import wave
@@ -41,20 +42,50 @@ def save_translation_cache(path: Path, cache: dict[str, str]) -> None:
     )
 
 
-def build_translation_prompt(sentences: list[str]) -> str:
-    payload = {"sentences": sentences}
+def build_translation_system_prompt() -> str:
     return (
-        "Translate the following English technical-blog sentences into natural Simplified Chinese. "
-        "Keep the meaning accurate, preserve technical terms such as PyTorch, and return only JSON "
-        "with a top-level key 'translations' whose value is an array of strings in the same order.\n\n"
-        f"{json.dumps(payload, ensure_ascii=False)}"
+        "You are a professional subtitle translator for AI technology articles. "
+        "Translate English sentences into natural Simplified Chinese in the context of AI, machine learning, "
+        "deep learning, programming, and software engineering. Preserve content that should not be translated, "
+        "including proper nouns, product names, model names, framework names, code, commands, APIs, file paths, "
+        "identifiers, quoted code-like text, and technical terms that are normally used in English. "
+        "Keep the meaning accurate and suitable for subtitles. Return strict JSON only, with no markdown, "
+        "using a top-level key 'translation' whose value is a string."
     )
+
+
+def build_translation_prompt(sentence: str) -> str:
+    return f"Translate this sentence:\n{json.dumps({'sentence': sentence}, ensure_ascii=False)}"
+
+
+def translate_one_sentence(client: OpenAI, model: str, sentence: str) -> str:
+    response = client.chat.completions.create(
+        model=model,
+        temperature=0.2,
+        messages=[
+            {
+                "role": "system",
+                "content": build_translation_system_prompt(),
+            },
+            {
+                "role": "user",
+                "content": build_translation_prompt(sentence),
+            },
+        ],
+        response_format={"type": "json_object"},
+    )
+    content = response.choices[0].message.content or ""
+    data = json.loads(content)
+    translation = data.get("translation")
+    if not isinstance(translation, str):
+        raise ValueError(f"unexpected translation response: {content}")
+    return translation.strip()
 
 
 def translate_missing_sentences(
     sentences: list[str],
     cache_path: Path,
-    batch_size: int,
+    concurrency: int,
     base_url: str,
     model: str,
 ) -> dict[str, str]:
@@ -69,36 +100,27 @@ def translate_missing_sentences(
     pending = [sentence for sentence in sentences if sentence not in cache]
     if not pending:
         return cache
+    if concurrency < 1:
+        raise SystemExit("--translation-concurrency must be at least 1")
 
     client = OpenAI(api_key=api_key, base_url=base_url)
-    for start in range(0, len(pending), batch_size):
-        batch = pending[start : start + batch_size]
-        print(f"translating {start + 1}-{start + len(batch)} / {len(pending)}")
-        response = client.chat.completions.create(
-            model=model,
-            temperature=0.2,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a professional subtitle translator. Return strict JSON only, with no markdown."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": build_translation_prompt(batch),
-                },
-            ],
-            response_format={"type": "json_object"},
-        )
-        content = response.choices[0].message.content or ""
-        data = json.loads(content)
-        translations = data.get("translations")
-        if not isinstance(translations, list) or len(translations) != len(batch):
-            raise SystemExit(f"unexpected translation response: {content}")
-        for source, translated in zip(batch, translations, strict=True):
-            cache[source] = translated.strip()
-        save_translation_cache(cache_path, cache)
+    print(f"translating {len(pending)} missing sentences with concurrency={concurrency}")
+    completed = 0
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = {
+            executor.submit(translate_one_sentence, client, model, sentence): sentence
+            for sentence in pending
+        }
+        for future in as_completed(futures):
+            source = futures[future]
+            try:
+                cache[source] = future.result()
+            except Exception as exc:
+                save_translation_cache(cache_path, cache)
+                raise SystemExit(f"failed to translate sentence: {source}\n{exc}") from exc
+            completed += 1
+            print(f"translated {completed} / {len(pending)}")
+            save_translation_cache(cache_path, cache)
 
     return cache
 
@@ -122,7 +144,7 @@ def main() -> None:
         help="add one translated Simplified Chinese line under each original line",
     )
     parser.add_argument("--translation-cache", default="translations_zh.json")
-    parser.add_argument("--translation-batch-size", type=int, default=20)
+    parser.add_argument("--translation-concurrency", type=int, default=20)
     parser.add_argument("--deepseek-base-url", default="https://api.deepseek.com")
     parser.add_argument("--deepseek-model", default="deepseek-v4-flash")
     args = parser.parse_args()
@@ -140,32 +162,35 @@ def main() -> None:
         )
 
     elapsed = 0.0
-    lines = []
+    blocks = []
     if args.include_metadata:
-        lines.extend([
-            f"[ti:{args.title}]",
-            f"[ar:{args.artist}]",
-            f"[al:{args.album}]",
-            "[by:generate_lrc.py]",
-        ])
+        blocks.append(
+            "\n".join([
+                f"[ti:{args.title}]",
+                f"[ar:{args.artist}]",
+                f"[al:{args.album}]",
+                "[by:generate_lrc.py]",
+            ])
+        )
 
     translations = None
     if args.translate_zh:
         translations = translate_missing_sentences(
             sentences=sentences,
             cache_path=Path(args.translation_cache),
-            batch_size=args.translation_batch_size,
+            concurrency=args.translation_concurrency,
             base_url=args.deepseek_base_url,
             model=args.deepseek_model,
         )
 
     for sentence, audio_file in zip(sentences, audio_files, strict=True):
-        lines.append(f"[{format_lrc_time(elapsed)}]{sentence}")
+        block_lines = [f"[{format_lrc_time(elapsed)}]{sentence}"]
         if translations is not None:
-            lines.append(translations[sentence])
+            block_lines.append(translations[sentence])
+        blocks.append("\n".join(block_lines))
         elapsed += wav_duration_seconds(audio_file)
 
-    Path(args.out).write_text("\n\n".join(lines) + "\n", encoding="utf-8")
+    Path(args.out).write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
     print(f"wrote {len(sentences)} lines to {args.out}; duration={elapsed:.2f}s")
 
 

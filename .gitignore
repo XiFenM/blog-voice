@@ -30,3 +30,6 @@ pytorch_internals_sentences.txt
 
 # Generated logs
 tts_run.log
+translations_zh.json
+voice_mode_report.tsv
+voices_split/
