@@ -37,5 +37,11 @@
   ],
   "split_mecha_then_normal": [
     77,78,79
-  ]
+  ],
+  "manual_split_ratios": {
+    "description": "Override the automated classifier's split ratio (0-1) for specific files. Only set for files where the classifier picks the wrong point.",
+    "71": 0.30,
+    "78": 0.33,
+    "79": 0.33
+  }
 }
