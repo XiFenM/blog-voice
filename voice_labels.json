@@ -40,7 +40,10 @@
   ],
   "manual_split_ratios": {
     "description": "Override the automated classifier's split ratio (0-1) for specific files. Only set for files where the classifier picks the wrong point.",
-    "71": 0.30,
+    "66": 0.59,
+    "69": 0.25,
+    "70": 0.25,
+    "71": 0.26,
     "78": 0.33,
     "79": 0.33
   }
