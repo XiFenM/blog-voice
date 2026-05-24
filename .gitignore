@@ -25,10 +25,13 @@ opencode.json
 /voices_split/
 /articles/*/source.txt
 /articles/*/sentences.txt
+/articles/*/sentences_enhanced.txt
+/articles/*/enhancements.json
 /articles/*/audio/
 /articles/*/merged.wav
 /articles/*/subtitle.lrc
 /articles/*/translations_zh.json
+/articles/*/verify_report.json
 
 # Generated logs / reports
 tts_run.log

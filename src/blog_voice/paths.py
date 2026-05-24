@@ -29,6 +29,14 @@ class ArticlePaths:
         return self.root / "sentences.txt"
 
     @property
+    def sentences_enhanced(self) -> Path:
+        return self.root / "sentences_enhanced.txt"
+
+    @property
+    def enhancement_cache(self) -> Path:
+        return self.root / "enhancements.json"
+
+    @property
     def audio_dir(self) -> Path:
         return self.root / "audio"
 
@@ -43,6 +51,10 @@ class ArticlePaths:
     @property
     def translation_cache(self) -> Path:
         return self.root / "translations_zh.json"
+
+    @property
+    def verify_report(self) -> Path:
+        return self.root / "verify_report.json"
 
     def ensure(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)

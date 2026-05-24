@@ -46,5 +46,26 @@
     "71": 0.26,
     "78": 0.33,
     "79": 0.33
+  },
+  "reference_ids": {
+    "description": "Fish Audio voice model IDs, uploaded once and reused via --fish-reference-id. Preferred for the article pipeline is `lively_20s`; the two singles are kept as backups for A/B testing.",
+    "lively_20s": {
+      "id": "bae505f2dba94936a09fa943ecfc5304",
+      "source": "voices_split/爱弥斯/refs/lively_20s.wav",
+      "role": "preferred",
+      "note": "022_自我介绍 (10.6s) + 250ms silence + 009_讨厌的食物 (9.8s); lively + chuckle"
+    },
+    "016_关于椿": {
+      "id": "020ffcdd01c94d97a171abbddcdb7f17",
+      "source": "voices/爱弥斯/016_关于椿.wav",
+      "role": "backup",
+      "note": "24.7s sustained excited narrative"
+    },
+    "022_自我介绍": {
+      "id": "2ae3b5c23ed64b51a3ab165443bccf4c",
+      "source": "voices/爱弥斯/022_自我介绍.wav",
+      "role": "backup",
+      "note": "10.6s short energetic self-introduction"
+    }
   }
 }

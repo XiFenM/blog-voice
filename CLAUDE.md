@@ -14,12 +14,14 @@ voice pipeline:
 article pipeline (per <slug>):
   <raw txt>         ─► article add        ─► articles/<slug>/source.txt + meta.json
   source.txt        ─► article split-text ─► articles/<slug>/sentences.txt
-  sentences.txt + ref-voice ─► article tts ─► articles/<slug>/audio/####.wav
+  sentences.txt    ─► article enhance    ─► articles/<slug>/sentences_enhanced.txt  (optional, fish only)
+  sentences[_enhanced].txt + ref-voice ─► article tts ─► articles/<slug>/audio/####.wav
   audio/*.wav       ─► article merge      ─► articles/<slug>/merged.wav
   sentences.txt + audio/*.wav ─► article lrc ─► articles/<slug>/subtitle.lrc
+  sentences.txt + audio/*.wav ─► article verify ─► articles/<slug>/verify_report.json  (optional)
 ```
 
-`article pipeline <slug>` chains split-text + tts + merge + lrc end-to-end. Each stage writes plain files; stages are independently rerunnable.
+`article pipeline <slug>` chains split-text + tts + merge + lrc end-to-end. `--enhance` and `--verify` opt in to the optional stages. Each stage writes plain files; stages are independently rerunnable.
 
 ## Project layout
 
@@ -27,11 +29,13 @@ article pipeline (per <slug>):
 src/blog_voice/
 ├── cli.py              # argparse subcommand entry: blog-voice [voice|article] <action>
 ├── paths.py            # ArticlePaths(slug) + ArticleMeta JSON read/write
+├── llm/zenmux.py       # shared OpenAI-compatible client (base_url=https://zenmux.ai/api/v1)
 ├── voices/             # scrape.py, classify.py (unsupervised), split.py (supervised)
-├── text/sentences.py
+├── text/               # sentences.py (split), enhance.py (LLM-injected Fish tags)
 ├── tts/                # base.py protocol, chatterbox.py, fish_audio.py, runner.py
 ├── audio/merge.py
-└── subtitle/lrc.py
+├── subtitle/lrc.py     # LRC + optional bilingual translation via ZenMux
+└── verify/audio.py     # multimodal-LLM audio QA via ZenMux
 ```
 
 The CLI is the only entry point — there are no top-level scripts. `pyproject.toml` registers `blog-voice = "blog_voice.cli:main"` as a console script and uses hatchling with `packages = ["src/blog_voice"]`.
@@ -50,11 +54,14 @@ uv run blog-voice voice split [--labels voice_labels.json]
 uv run blog-voice article add <slug> --source <file> --title T --artist A \
     --ref-voice voices_split/X/normal/foo.wav [--backend chatterbox|fish]
 uv run blog-voice article split-text <slug>
+uv run blog-voice article enhance <slug> [--model deepseek/deepseek-v4-pro]    # fish only
 uv run blog-voice article tts <slug> [--limit 5] [--device cuda|cpu] \
-    [--backend chatterbox|fish] [--ref <wav>] [--fish-reference-id <id>]
+    [--backend chatterbox|fish] [--ref <wav>] [--fish-reference-id <id>] \
+    [--use-enhanced auto|yes|no]
 uv run blog-voice article merge <slug> [--gap 0.3]
-uv run blog-voice article lrc <slug> [--translate-zh] [--include-metadata]
-uv run blog-voice article pipeline <slug> [...all of the above args...]
+uv run blog-voice article lrc <slug> [--translate-zh] [--translation-model deepseek/deepseek-v4-flash]
+uv run blog-voice article verify <slug> [--model google/gemini-3.5-flash] [--language English]
+uv run blog-voice article pipeline <slug> [...all of the above args + --enhance --verify]
 ```
 
 No tests, no linter, no build step beyond `uv sync`.
@@ -75,13 +82,23 @@ No tests, no linter, no build step beyond `uv sync`.
   1. `reference_id` — a voice clone model already saved in your fish.audio account. Fastest and most stable, recommended for long runs.
   2. Local wav file — uploaded inline as `ReferenceAudio(audio=bytes, text=transcript)`. The API requires a transcript for the reference clip; **`voice scrape` writes the kurobbs `content` field next to each wav as `<name>.transcript.txt`**, so for whole pure clips the transcript is free. If the transcript file is missing (e.g. a split fragment, or a non-kurobbs wav), the backend falls back to a one-time Fish ASR call and caches the result in the same `<name>.transcript.txt` path. Manual edits to that file are honored next run. Outputs PCM by default.
 
-API keys go in `.env`: `FISH_API_KEY` (or legacy `FISH_AUDIO_API_KEY`), `DEEPSEEK_API_KEY`.
+API keys go in `.env`: `FISH_API_KEY` (or legacy `FISH_AUDIO_API_KEY`) for TTS; `ZENMUX_API_KEY` covers all LLM call sites (translation, sentence enhancement, audio verification).
+
+Per-character Fish Audio voice model IDs (uploaded via fish.audio's voice cloning UI/API) live in `voice_labels.json` under `reference_ids` — each entry has `id`, `source` wav path, `role` (`preferred` vs `backup`), and a `note`. Per-article default goes in `articles/<slug>/meta.json:fish_reference_id`.
 
 **`tts/runner.py`** — resumability via `dest.exists() and dest.stat().st_size > 0` — interrupted partial writes can corrupt; the chatterbox path is atomic through torchaudio's tmp, the fish path writes bytes directly so a half-written file can be deleted manually.
 
 **`audio/merge.py`** — concatenates wavs using `soundfile` (not stdlib `wave`) because chatterbox produces float32 and stdlib `wave` only handles PCM. Output is forced to 16-bit PCM. Returns per-sentence end-timestamps so the LRC generator uses the same timing as the merged audio (which may include `--gap` silence between sentences).
 
-**`subtitle/lrc.py`** — generates per-sentence LRC timestamps either from a passed-in `timestamps` list (used by `pipeline` so silence gaps are respected) or by summing wav durations (used by standalone `article lrc`). `--translate-zh` calls DeepSeek per sentence (20-way ThreadPoolExecutor, `json_object` response_format) and caches into `articles/<slug>/translations_zh.json`, written incrementally so a crash doesn't lose progress.
+**`llm/zenmux.py`** — single OpenAI-compatible client factory pointing at `https://zenmux.ai/api/v1`, reads `ZENMUX_API_KEY` from env. Shared by translation, enhancement, and verification so one provider key fronts all three (model id format is `provider/model-name`). Default model constants live here: `DEFAULT_TRANSLATION_MODEL=deepseek/deepseek-v4-flash`, `DEFAULT_ENHANCEMENT_MODEL=deepseek/deepseek-v4-pro`, `DEFAULT_VERIFY_MODEL=google/gemini-3.5-flash`. They're imported by `cli.py` for argparse defaults so a single edit in zenmux.py propagates to every command.
+
+`chat_completion(model, **kwargs)` is the single function call sites should use instead of `client.chat.completions.create()` directly: it tries ZenMux first, and on **any** exception falls back to the DeepSeek native API (`https://api.deepseek.com`, key from `DEEPSEEK_API_KEY`) — but only for `deepseek/*` models, mapped to native names (`deepseek-reasoner` if the slug contains "reasoner"/"r1", else `deepseek-chat`). Non-DeepSeek models re-raise. The fallback client is lazily created and module-cached. Set `DEEPSEEK_API_KEY` in `.env` to enable; without it the fallback is a no-op and the ZenMux error propagates.
+
+**`subtitle/lrc.py`** — generates per-sentence LRC timestamps either from a passed-in `timestamps` list (used by `pipeline` so silence gaps are respected) or by summing wav durations (used by standalone `article lrc`). `--translate-zh` calls the chosen ZenMux model per sentence (configurable concurrency, `json_object` response_format) and caches into `articles/<slug>/translations_zh.json`, written incrementally so a crash doesn't lose progress. The cache key is the source English sentence, so switching translation model produces a new cache file only if you delete the old one; existing cached translations are reused.
+
+**`text/enhance.py`** — LLM injects Fish Audio S2-Pro bracket tags into each sentence. The system prompt embeds a curated tag inventory (pause/breath/emphasis + a small emotion subset suited to tech narration) and placement rules (emotion at sentence start only, ≤2 tags per span, sparing use). Writes `articles/<slug>/sentences_enhanced.txt` plus a `enhancements.json` cache. **Only useful for the fish backend** — chatterbox doesn't recognize the tags and would read them as literal text. `cli._pick_sentences_path` auto-routes: chatterbox → `sentences.txt`, fish → `sentences_enhanced.txt` if it exists, falling back to plain. `article lrc` and `article verify` always use the plain `sentences.txt` because the tags are TTS-internal artifacts that shouldn't appear in the subtitle or be sent to the QA model.
+
+**`verify/audio.py`** — base64-encodes each wav and sends it with the original sentence to a multimodal ZenMux model (default `google/gemini-3.5-flash`) using the OpenAI-style `input_audio` content part. Response is a strict JSON verdict (`ok`, `matches_text`, `naturalness 1-5`, `transcription`, `issues[]`). The per-clip result is written incrementally into `articles/<slug>/verify_report.json` keyed by index, so the run is resumable; the report's top-level `passed/total/failed_indexes` summary is recomputed at the end of each run. Concurrency is intentionally lower than translation (default 5 vs 20) because audio payloads can be much larger.
 
 **`paths.py`** — `ArticlePaths(slug)` is the canonical accessor for an article's files; `ArticleMeta` is a dataclass stored as `articles/<slug>/meta.json` so default ref-voice / backend / artist / title can live alongside the data instead of being passed every time.
 
@@ -103,9 +120,22 @@ for f in sorted(glob.glob('voices_split/<character>/normal/*.wav')):
 "
 ```
 
-Then prefer `自我介绍 / 心声 / 闲趣 / 抱负` over `重击 / 突破 / 受击` (the latter contain shouts/SFX). The picked clip name is also in `voices/<character>/manifest.json`. For 爱弥斯 the current default ref is `voices_split/爱弥斯/normal/104_滑翔.wav`.
+Then prefer `自我介绍 / 心声 / 闲趣 / 抱负` over `重击 / 突破 / 受击` (the latter contain shouts/SFX). The picked clip name is also in `voices/<character>/manifest.json`. For 爱弥斯 the current default ref is **`voices_split/爱弥斯/refs/lively_20s.wav`** — a 20.7s 48kHz/24-bit merge of `022_自我介绍` (10.6s) + 250ms silence + `009_讨厌的食物` (9.8s), chosen for the user's "活泼开朗" preference (declarative intro + literal chuckle, wide prosody range).
+
+For Fish Audio TTS, the user has pre-uploaded three voice models and stored the `reference_id`s in `voice_labels.json:reference_ids`: `lively_20s` (preferred, default in `articles/pytorch-internals/meta.json:fish_reference_id`), plus `016_关于椿` and `022_自我介绍` as backups for A/B testing.
 
 ## See also
 
 - [voice.md](voice.md) — TTS model selection rationale, reference-audio prep, technical-term preprocessing advice. Read this before changing TTS engines or trying to improve output quality.
-- [README.md](README.md) — user-facing setup + run instructions for the unified CLI.
+- [README.md](README.md) — user-facing setup + run instructions for the unified CLI, including the 5-minute quickstart.
+- [voice_labels.json](voice_labels.json) — per-character voice mode labels + Fish Audio `reference_id` registry.
+
+## What to do when ZenMux hits 402
+
+ZenMux's free-tier rolling-window quota is tight enough that a full 250-sentence run (enhance 250 + translate 250 = ~500 chat completions) routinely exhausts it. Symptoms: `APIStatusError: Error code: 402 - {'error': {'code': '402', 'type': 'quote_exceeded', ...}}` mid-run, and `translate_sentences` / `enhance_sentences` raises `SystemExit` after the first failure.
+
+Recovery, in order of preference:
+1. **Configure DeepSeek fallback once**: set `DEEPSEEK_API_KEY` in `.env`. After that, any `deepseek/*` model that fails on ZenMux is silently retried against `https://api.deepseek.com` with the mapped native model id (`deepseek-chat` / `deepseek-reasoner`). Costs are usually lower than ZenMux. Run the same `article lrc` / `article enhance` command and it picks up where the cache left off — already-translated sentences are not re-billed.
+2. **Switch model for the failing call**: e.g. `article lrc --translation-model openai/gpt-4o-mini` to dodge `deepseek/*` quota specifically (only useful if your OpenAI bucket on ZenMux is independent).
+3. **Wait for the rolling window** to refresh. Translation/enhancement caches survive across runs, so resuming costs nothing for completed sentences.
+4. **Audio verify (Gemini) has no fallback** — DeepSeek doesn't host multimodal audio models. If verify dies on 402, the only options are wait or upgrade ZenMux. Run `article verify --limit N` to do it in chunks; the report is keyed by sentence index so partial runs are safe.

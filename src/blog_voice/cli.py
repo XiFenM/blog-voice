@@ -9,10 +9,12 @@ Subcommands grouped by domain:
   article add <slug> --source FILE [--title T] [--artist A] [--backend ...]
                                create articles/<slug>/ and copy in source.txt
   article split-text <slug>    split source.txt into sentences.txt
+  article enhance <slug>       inject Fish prosody/emotion tags into sentences (fish backend only)
   article tts <slug> [...]     run the TTS backend over every sentence
   article merge <slug>         concatenate per-sentence wavs into merged.wav
   article lrc <slug> [...]     emit subtitle.lrc, optionally bilingual
-  article pipeline <slug> [...] run split-text + tts + merge + lrc end-to-end
+  article verify <slug> [...]  use a multimodal LLM to QA each generated wav
+  article pipeline <slug> [...] run split-text + (enhance) + tts + merge + lrc + (verify) end-to-end
 """
 
 import argparse
@@ -20,10 +22,17 @@ import shutil
 from pathlib import Path
 
 from blog_voice.audio.merge import merge_wavs
+from blog_voice.llm.zenmux import (
+    DEFAULT_ENHANCEMENT_MODEL,
+    DEFAULT_TRANSLATION_MODEL,
+    DEFAULT_VERIFY_MODEL,
+)
 from blog_voice.paths import ArticleMeta, article_paths
 from blog_voice.subtitle.lrc import translate_sentences, write_lrc
+from blog_voice.text.enhance import enhance_sentences, write_enhanced_file
 from blog_voice.text.sentences import split_file
 from blog_voice.tts.runner import read_sentences, run as run_tts
+from blog_voice.verify.audio import verify_article
 
 
 def _add_voice_subcommands(sub: argparse._SubParsersAction) -> None:
@@ -65,6 +74,13 @@ def _add_article_subcommands(sub: argparse._SubParsersAction) -> None:
     p_split.add_argument("slug")
     p_split.set_defaults(func=_cmd_article_split_text)
 
+    p_enhance = sub.add_parser(
+        "enhance",
+        help="inject Fish Audio prosody/emotion tags into each sentence via LLM (fish backend only)",
+    )
+    _add_enhance_args(p_enhance)
+    p_enhance.set_defaults(func=_cmd_article_enhance)
+
     p_tts = sub.add_parser("tts", help="run the TTS backend over every sentence")
     _add_tts_args(p_tts)
     p_tts.set_defaults(func=_cmd_article_tts)
@@ -75,25 +91,30 @@ def _add_article_subcommands(sub: argparse._SubParsersAction) -> None:
     p_merge.set_defaults(func=_cmd_article_merge)
 
     p_lrc = sub.add_parser("lrc", help="emit subtitle.lrc (optionally bilingual)")
-    p_lrc.add_argument("slug")
-    p_lrc.add_argument("--translate-zh", action="store_true")
-    p_lrc.add_argument("--include-metadata", action="store_true")
-    p_lrc.add_argument("--translation-concurrency", type=int, default=20)
-    p_lrc.add_argument("--deepseek-base-url", default="https://api.deepseek.com")
-    p_lrc.add_argument("--deepseek-model", default="deepseek-v4-flash")
+    _add_lrc_args(p_lrc)
     p_lrc.set_defaults(func=_cmd_article_lrc)
+
+    p_verify = sub.add_parser(
+        "verify",
+        help="audio QA via multimodal LLM (writes verify_report.json)",
+    )
+    _add_verify_args(p_verify)
+    p_verify.set_defaults(func=_cmd_article_verify)
 
     p_pipe = sub.add_parser(
         "pipeline",
-        help="run split-text + tts + merge + lrc in one shot",
+        help="run split-text + (enhance) + tts + merge + lrc + (verify) in one shot",
     )
     _add_tts_args(p_pipe)
     p_pipe.add_argument("--gap", type=float, default=0.0)
-    p_pipe.add_argument("--translate-zh", action="store_true")
-    p_pipe.add_argument("--include-metadata", action="store_true")
-    p_pipe.add_argument("--translation-concurrency", type=int, default=20)
-    p_pipe.add_argument("--deepseek-base-url", default="https://api.deepseek.com")
-    p_pipe.add_argument("--deepseek-model", default="deepseek-v4-flash")
+    _add_lrc_extra_args(p_pipe)
+    p_pipe.add_argument("--enhance", action="store_true", help="run sentence-tag enhancement before fish TTS")
+    p_pipe.add_argument("--enhance-model", default=DEFAULT_ENHANCEMENT_MODEL)
+    p_pipe.add_argument("--enhance-concurrency", type=int, default=10)
+    p_pipe.add_argument("--verify", action="store_true", help="run audio QA after merging")
+    p_pipe.add_argument("--verify-model", default=DEFAULT_VERIFY_MODEL)
+    p_pipe.add_argument("--verify-concurrency", type=int, default=5)
+    p_pipe.add_argument("--verify-language", default="English")
     p_pipe.set_defaults(func=_cmd_article_pipeline)
 
 
@@ -109,6 +130,38 @@ def _add_tts_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--fish-ref-language", default="zh", help="fish only: language code for ASR of reference wav")
     p.add_argument("--fish-format", default="wav", choices=["wav", "mp3", "pcm", "opus"])
     p.add_argument("--fish-sample-rate", type=int, default=44100)
+    p.add_argument(
+        "--use-enhanced",
+        default="auto",
+        choices=["auto", "yes", "no"],
+        help="fish: read sentences_enhanced.txt if present (auto=yes when file exists)",
+    )
+
+
+def _add_enhance_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("slug")
+    p.add_argument("--model", default=DEFAULT_ENHANCEMENT_MODEL, help="ZenMux model id")
+    p.add_argument("--concurrency", type=int, default=10)
+
+
+def _add_lrc_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("slug")
+    _add_lrc_extra_args(p)
+
+
+def _add_lrc_extra_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--translate-zh", action="store_true")
+    p.add_argument("--include-metadata", action="store_true")
+    p.add_argument("--translation-concurrency", type=int, default=20)
+    p.add_argument("--translation-model", default=DEFAULT_TRANSLATION_MODEL, help="ZenMux model id")
+
+
+def _add_verify_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("slug")
+    p.add_argument("--model", default=DEFAULT_VERIFY_MODEL, help="multimodal ZenMux model id (must accept audio)")
+    p.add_argument("--concurrency", type=int, default=5)
+    p.add_argument("--limit", type=int, default=0, help="0 = all sentences")
+    p.add_argument("--language", default="English", help="language the audio should be in")
 
 
 def _cmd_voice_scrape(args: argparse.Namespace) -> None:
@@ -172,6 +225,20 @@ def _cmd_article_split_text(args: argparse.Namespace) -> None:
     split_file(paths.source, paths.sentences)
 
 
+def _cmd_article_enhance(args: argparse.Namespace) -> None:
+    paths = article_paths(args.slug)
+    if not paths.sentences.exists():
+        raise SystemExit(f"missing sentences file: {paths.sentences} (run `article split-text` first)")
+    sentences = read_sentences(paths.sentences)
+    cache = enhance_sentences(
+        sentences=sentences,
+        cache_path=paths.enhancement_cache,
+        concurrency=args.concurrency,
+        model=args.model,
+    )
+    write_enhanced_file(sentences, cache, paths.sentences_enhanced)
+
+
 def _build_backend(args: argparse.Namespace, meta: ArticleMeta):
     backend_name = args.backend or meta.backend or "chatterbox"
     ref_path = Path(args.ref or meta.ref_voice) if (args.ref or meta.ref_voice) else None
@@ -201,13 +268,43 @@ def _build_backend(args: argparse.Namespace, meta: ArticleMeta):
     raise SystemExit(f"unknown backend: {backend_name}")
 
 
+def _pick_sentences_path(args: argparse.Namespace, paths) -> Path:
+    """Decide whether to feed the enhanced or the plain sentences file to TTS.
+
+    Only the fish backend understands the tags, so chatterbox always reads
+    the plain file. For fish, `--use-enhanced auto` (default) reads the
+    enhanced file when it's present and falls back to plain otherwise.
+    """
+    backend = args.backend or "chatterbox"
+    use = args.use_enhanced
+    if backend != "fish" or use == "no":
+        return paths.sentences
+    if use == "yes":
+        if not paths.sentences_enhanced.exists():
+            raise SystemExit(
+                f"--use-enhanced=yes but {paths.sentences_enhanced} is missing "
+                "(run `article enhance` first)"
+            )
+        return paths.sentences_enhanced
+    # auto: prefer enhanced when present
+    return paths.sentences_enhanced if paths.sentences_enhanced.exists() else paths.sentences
+
+
 def _cmd_article_tts(args: argparse.Namespace) -> None:
     paths = article_paths(args.slug)
-    if not paths.sentences.exists():
-        raise SystemExit(f"missing sentences file: {paths.sentences} (run `article split-text` first)")
     meta = ArticleMeta.load(paths.meta)
     backend = _build_backend(args, meta)
-    sentences = read_sentences(paths.sentences)
+
+    # _pick_sentences_path needs the resolved backend name, not the empty
+    # default; mirror it onto args so the helper can read it uniformly.
+    args.backend = backend.name
+    sentences_path = _pick_sentences_path(args, paths)
+    if not sentences_path.exists():
+        raise SystemExit(f"missing sentences file: {sentences_path}")
+    if sentences_path == paths.sentences_enhanced:
+        print(f"using enhanced sentences: {sentences_path.name}")
+
+    sentences = read_sentences(sentences_path)
     suffix = ".wav"
     if backend.name == "fish":
         suffix = f".{args.fish_format}"
@@ -251,8 +348,7 @@ def _cmd_article_lrc(args: argparse.Namespace) -> None:
             sentences=sentences,
             cache_path=paths.translation_cache,
             concurrency=args.translation_concurrency,
-            base_url=args.deepseek_base_url,
-            model=args.deepseek_model,
+            model=args.translation_model,
         )
 
     write_lrc(
@@ -268,6 +364,26 @@ def _cmd_article_lrc(args: argparse.Namespace) -> None:
     )
 
 
+def _cmd_article_verify(args: argparse.Namespace) -> None:
+    paths = article_paths(args.slug)
+    if not paths.sentences.exists():
+        raise SystemExit(f"missing sentences file: {paths.sentences}")
+    sentences = read_sentences(paths.sentences)
+    audio_files = _audio_files(paths)
+    if not audio_files:
+        raise SystemExit(f"no .wav files under {paths.audio_dir}")
+    sentences = sentences[: len(audio_files)]
+    verify_article(
+        sentences=sentences,
+        audio_files=audio_files,
+        report_path=paths.verify_report,
+        model=args.model,
+        concurrency=args.concurrency,
+        target_language=args.language,
+        limit=args.limit,
+    )
+
+
 def _cmd_article_pipeline(args: argparse.Namespace) -> None:
     paths = article_paths(args.slug)
     meta = ArticleMeta.load(paths.meta)
@@ -276,7 +392,28 @@ def _cmd_article_pipeline(args: argparse.Namespace) -> None:
     split_file(paths.source, paths.sentences)
 
     backend = _build_backend(args, meta)
-    sentences = read_sentences(paths.sentences)
+    args.backend = backend.name
+
+    if args.enhance:
+        if backend.name != "fish":
+            print(f"note: --enhance has no effect on backend={backend.name}; skipping")
+        else:
+            base_sentences = read_sentences(paths.sentences)
+            cache = enhance_sentences(
+                sentences=base_sentences,
+                cache_path=paths.enhancement_cache,
+                concurrency=args.enhance_concurrency,
+                model=args.enhance_model,
+            )
+            write_enhanced_file(base_sentences, cache, paths.sentences_enhanced)
+
+    sentences_path = _pick_sentences_path(args, paths)
+    if sentences_path == paths.sentences_enhanced:
+        print(f"using enhanced sentences: {sentences_path.name}")
+    sentences = read_sentences(sentences_path)
+    # Original (untagged) sentences for LRC and verification.
+    plain_sentences = read_sentences(paths.sentences)
+
     suffix = ".wav"
     if backend.name == "fish":
         suffix = f".{args.fish_format}"
@@ -290,15 +427,14 @@ def _cmd_article_pipeline(args: argparse.Namespace) -> None:
     translations = None
     if args.translate_zh:
         translations = translate_sentences(
-            sentences=sentences[: len(files)],
+            sentences=plain_sentences[: len(files)],
             cache_path=paths.translation_cache,
             concurrency=args.translation_concurrency,
-            base_url=args.deepseek_base_url,
-            model=args.deepseek_model,
+            model=args.translation_model,
         )
 
     write_lrc(
-        sentences=sentences[: len(files)],
+        sentences=plain_sentences[: len(files)],
         timestamps=timestamps,
         audio_files=None,
         out_path=paths.lrc,
@@ -309,6 +445,17 @@ def _cmd_article_pipeline(args: argparse.Namespace) -> None:
         translations=translations,
     )
 
+    if args.verify:
+        verify_article(
+            sentences=plain_sentences[: len(files)],
+            audio_files=files,
+            report_path=paths.verify_report,
+            model=args.verify_model,
+            concurrency=args.verify_concurrency,
+            target_language=args.verify_language,
+            limit=0,
+        )
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="blog-voice")
@@ -318,7 +465,10 @@ def main() -> None:
     voice_sub = voice.add_subparsers(dest="action", required=True)
     _add_voice_subcommands(voice_sub)
 
-    article = top.add_parser("article", help="article pipeline: add / split-text / tts / merge / lrc / pipeline")
+    article = top.add_parser(
+        "article",
+        help="article pipeline: add / split-text / enhance / tts / merge / lrc / verify / pipeline",
+    )
     article_sub = article.add_subparsers(dest="action", required=True)
     _add_article_subcommands(article_sub)
 

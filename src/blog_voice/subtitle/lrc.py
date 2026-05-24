@@ -1,18 +1,18 @@
 """Generate an LRC file from per-sentence wav durations + sentences.
 
-If `--translate-zh` is set, calls DeepSeek to translate each English sentence
-into Simplified Chinese and writes the translation as a second line under
-each timestamped sentence. Translations are cached on disk so re-runs are
-free.
+If `--translate-zh` is set, calls an LLM via ZenMux to translate each English
+sentence into Simplified Chinese and writes the translation as a second line
+under each timestamped sentence. Translations are cached on disk so re-runs
+are free.
 """
 
 import json
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import soundfile as sf
-from dotenv import load_dotenv
+
+from blog_voice.llm.zenmux import chat_completion
 
 
 def format_lrc_time(seconds: float) -> str:
@@ -43,8 +43,8 @@ def _user_prompt(sentence: str) -> str:
     return f"Translate this sentence:\n{json.dumps({'sentence': sentence}, ensure_ascii=False)}"
 
 
-def _translate_one(client, model: str, sentence: str) -> str:
-    response = client.chat.completions.create(
+def _translate_one(model: str, sentence: str) -> str:
+    response = chat_completion(
         model=model,
         temperature=0.2,
         messages=[
@@ -78,18 +78,8 @@ def translate_sentences(
     sentences: list[str],
     cache_path: Path,
     concurrency: int,
-    base_url: str,
     model: str,
 ) -> dict[str, str]:
-    load_dotenv()
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise SystemExit("DEEPSEEK_API_KEY is missing. Put it in .env before using --translate-zh.")
-    try:
-        from openai import OpenAI
-    except ImportError as exc:
-        raise SystemExit("openai package is not installed. Run `uv sync`.") from exc
-
     cache = _load_cache(cache_path)
     pending = [s for s in sentences if s not in cache]
     if not pending:
@@ -97,12 +87,11 @@ def translate_sentences(
     if concurrency < 1:
         raise SystemExit("concurrency must be at least 1")
 
-    client = OpenAI(api_key=api_key, base_url=base_url)
-    print(f"translating {len(pending)} missing sentences with concurrency={concurrency}")
+    print(f"translating {len(pending)} sentences via {model} (concurrency={concurrency})")
     completed = 0
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = {
-            executor.submit(_translate_one, client, model, sentence): sentence
+            executor.submit(_translate_one, model, sentence): sentence
             for sentence in pending
         }
         for future in as_completed(futures):

@@ -62,7 +62,7 @@ class FishAudioBackend:
     ):
         try:
             from fishaudio import FishAudio
-            from fishaudio.types import ReferenceAudio
+            from fishaudio.types import ReferenceAudio, TTSConfig
         except ImportError as exc:
             raise SystemExit(
                 "fish-audio-sdk is not installed. Run `uv sync` to install it."
@@ -70,6 +70,7 @@ class FishAudioBackend:
 
         self._FishAudio = FishAudio
         self._ReferenceAudio = ReferenceAudio
+        self._TTSConfig = TTSConfig
         self.client = FishAudio(api_key=_read_api_key())
         self.reference_id = reference_id.strip()
         self.ref_voice = ref_voice
@@ -100,12 +101,13 @@ class FishAudioBackend:
         return self._references
 
     def synthesize(self, text: str, dest: Path) -> None:
-        kwargs = dict(
-            text=text,
+        # SDK v1.3.0: format / sample_rate live inside TTSConfig.
+        # reference_id / references stay as top-level convert() kwargs.
+        config = self._TTSConfig(
             format=self.audio_format,
             sample_rate=self._sample_rate,
-            model=self.model,
         )
+        kwargs = dict(text=text, model=self.model, config=config)
         if self.reference_id:
             kwargs["reference_id"] = self.reference_id
         else:

@@ -1,21 +1,65 @@
 # blog-voice
 
-把英文技术博客转成"任意角色音色"的语音音频 + 双语 LRC 字幕。当前实例：用《鸣潮》角色**爱弥斯**的音色朗读 ezyang 的 *PyTorch internals*。
+把英文技术博客转成"任意角色音色"的语音音频 + 双语 LRC 字幕，并用多模态 LLM 校验生成质量。当前实例：用《鸣潮》角色**爱弥斯**的音色朗读 ezyang 的 *PyTorch internals*。
 
 整个流水线：
 
 ```
-wiki.kurobbs.com ──► voice scrape ──► voices/<角色>/*.wav (参考音色库)
-                                  └─► voice split ──► voices_split/<角色>/{normal,mecha}/
+voice library
+  wiki.kurobbs.com  ──► voice scrape ──► voices/<角色>/*.wav + transcript + manifest
+                    └─► voice split  ──► voices_split/<角色>/{normal,mecha}/
 
-blog URL  ──► (playwright eval) ──► articles/<slug>/source.txt
-              └─► article split-text ──► articles/<slug>/sentences.txt
-              └─► article tts        ──► articles/<slug>/audio/####.wav   (chatterbox 本地 / fish API)
-              └─► article merge      ──► articles/<slug>/merged.wav
-              └─► article lrc        ──► articles/<slug>/subtitle.lrc     (可加 --translate-zh)
+article pipeline (per slug)
+  blog URL ──► (playwright eval) ──► articles/<slug>/source.txt
+       └─► article split-text   ──► sentences.txt
+       └─► article enhance      ──► sentences_enhanced.txt   (可选; LLM 注入 Fish 标签, 仅 fish 后端)
+       └─► article tts          ──► audio/####.wav           (chatterbox 本地 / fish API)
+       └─► article merge        ──► merged.wav
+       └─► article lrc          ──► subtitle.lrc             (可 --translate-zh 加中文翻译)
+       └─► article verify       ──► verify_report.json       (可选; 多模态 LLM 校验音频)
 ```
 
-每篇文章一个目录，自带 `meta.json` 存默认 ref 音色和后端选择，所以同时跑多篇互不打架。
+每篇文章一个目录，自带 `meta.json` 存默认 ref 音色和后端选择，所以同时跑多篇互不打架。所有 LLM 调用统一走 [ZenMux 网关](https://zenmux.ai)（OpenAI 协议），纯文本调用（翻译 / 标签增强）失败时自动回退到 DeepSeek 官方 API。
+
+## 5 分钟 quickstart
+
+从零跑通"爱弥斯念 PyTorch internals"：
+
+```bash
+# 1. 安装
+curl -LsSf https://astral.sh/uv/install.sh | sh
+git clone git@github.com:XiFenM/blog-voice.git && cd blog-voice
+uv sync
+
+# 2. 配置 key（.env 文件）
+cp .env.example .env
+# 编辑 .env，至少填 ZENMUX_API_KEY + FISH_API_KEY（chatterbox 本地后端可不要 fish）
+
+# 3. 抓角色语音库（116 条，约 30s）
+uv run blog-voice voice scrape https://wiki.kurobbs.com/mc/item/1457744312692867072
+uv run blog-voice voice split   # 用仓库自带的 voice_labels.json 拆 normal/mecha
+
+# 4. 抓博客文本（用本机 Chrome + playwright-cli，见下文"前置工具"）
+playwright-cli attach --cdp=http://localhost:9222
+playwright-cli goto https://blog.ezyang.com/2019/05/pytorch-internals/
+playwright-cli --raw eval "() => document.querySelector('article.post').innerText" > /tmp/blog.txt
+
+# 5. 创建文章并跑全流程（fish API + 标签增强 + 中文字幕 + 音频校验）
+uv run blog-voice article add pytorch-internals --source /tmp/blog.txt \
+  --title "PyTorch internals" --artist 爱弥斯 \
+  --ref-voice voices_split/爱弥斯/refs/lively_20s.wav \
+  --backend fish --fish-reference-id <你在 fish.audio 上传 lively_20s.wav 后拿到的 id>
+
+uv run blog-voice article pipeline pytorch-internals \
+  --enhance --translate-zh --verify --include-metadata --gap 0.3
+```
+
+跑完输出在 [articles/pytorch-internals/](articles/pytorch-internals/)：
+- `merged.wav` —— 完整音频（fish 出 44.1kHz/16-bit，250 句约 37 分钟）
+- `subtitle.lrc` —— 双语 LRC 字幕
+- `verify_report.json` —— 每句的 QA 报告，含整体 pass rate 和失败 index
+
+后续修改单个步骤可以单独重跑，所有阶段都断点续跑（已生成的 wav / 已缓存的翻译 / 已校验的句子都会跳过）。
 
 ## 安装
 
@@ -63,11 +107,19 @@ uv sync   # 装全部依赖 + 注册 `blog-voice` CLI 入口
 
 ### `.env` 配置（按需）
 
-复制 `.env.example` 到 `.env`，按需填：
+复制 `.env.example` 到 `.env`，按以下需求填：
 
-- `DEEPSEEK_API_KEY=...` —— `article lrc --translate-zh` 走 DeepSeek 翻译时需要
-- `FISH_API_KEY=...` —— TTS 后端选 `fish` 时需要，[在这里申请](https://fish.audio/app/api-keys/)
-- `HF_ENDPOINT=https://hf-mirror.com` —— chatterbox 后端首次下载模型走镜像（可选）
+| key | 何时必需 | 说明 |
+|---|---|---|
+| `ZENMUX_API_KEY` | 用 `enhance` / `lrc --translate-zh` / `verify` 任一时 | LLM 网关 [zenmux.ai](https://zenmux.ai)，一把 key 同时覆盖三处（翻译 / 标签增强 / 音频校验），model id 走 `provider/model-name` 格式 |
+| `DEEPSEEK_API_KEY` | 可选 | ZenMux 配额耗尽/网络异常时**自动回退**到 [DeepSeek 官方 API](https://platform.deepseek.com/api_keys)，仅对 `deepseek/*` 模型有效。音频校验（Gemini）没有兜底 |
+| `FISH_API_KEY` | TTS 后端选 `fish` 时 | [fish.audio](https://fish.audio/app/api-keys/) |
+| `HF_ENDPOINT` | chatterbox 首次下载模型时（可选） | 设为 `https://hf-mirror.com` 走镜像 |
+
+**默认模型**（在 [src/blog_voice/llm/zenmux.py](src/blog_voice/llm/zenmux.py) 集中改）：
+- 翻译：`deepseek/deepseek-v4-flash`
+- 标签增强：`deepseek/deepseek-v4-pro`
+- 音频校验：`google/gemini-3.5-flash`
 
 ## CLI 总览
 
@@ -80,10 +132,12 @@ uv sync   # 装全部依赖 + 注册 `blog-voice` CLI 入口
 | `voice split` | 用手工标的 [voice_labels.json](voice_labels.json) 拆分混合片段到 `voices_split/<角色>/{normal,mecha}/` |
 | `article add <slug> --source FILE` | 创建 `articles/<slug>/`，写入 `source.txt` + `meta.json` |
 | `article split-text <slug>` | 切句到 `sentences.txt` |
-| `article tts <slug>` | 每句生成一个 wav 到 `audio/####.wav`，支持断点续跑 |
+| `article enhance <slug>` | 走 ZenMux 给每句注入 Fish 标签（`[break]/[emphasis]/[curious]`…），写 `sentences_enhanced.txt`。**仅 fish 后端有意义** |
+| `article tts <slug>` | 每句生成一个 wav 到 `audio/####.wav`，支持断点续跑。fish 后端会自动用 enhanced 版本（如果存在） |
 | `article merge <slug>` | 拼成单个 `merged.wav` |
-| `article lrc <slug>` | 生成 `subtitle.lrc`，`--translate-zh` 给每句加一行中文翻译 |
-| `article pipeline <slug>` | 串起 split-text + tts + merge + lrc 一把梭 |
+| `article lrc <slug>` | 生成 `subtitle.lrc`，`--translate-zh` 给每句加一行中文翻译（走 ZenMux） |
+| `article verify <slug>` | 把每条音频 + 原句送给支持音频输入的多模态模型（默认 `google/gemini-3.5-flash`），输出 `verify_report.json` |
+| `article pipeline <slug>` | 串起 split-text + (enhance) + tts + merge + lrc + (verify) 一把梭，用 `--enhance` / `--verify` 开关启用可选步骤 |
 
 每个子命令 `--help` 看完整参数。
 
@@ -217,6 +271,24 @@ uv run blog-voice article tts pytorch-internals \
 | chatterbox / 6–8 GB VRAM GPU | ~0.3–0.5× 实时 | 5–15 分钟 |
 | fish-audio API | ~0.5–1× 实时 | 视并发，几分钟到十几分钟 |
 
+## 6.5. （fish 专用）句子标签增强 — `article enhance`
+
+只对 fish 后端有意义。chatterbox 不认 `[break]` `[emphasis]` 这类标签会按字面读出来。
+
+```bash
+uv run blog-voice article enhance pytorch-internals \
+  --model deepseek/deepseek-v4-pro --concurrency 10
+```
+
+走 ZenMux 调 LLM，按一份 prompt（内置 Fish S2-Pro 支持的标签清单 + 放置规则）给每句注入最小量的标签，写到 `articles/<slug>/sentences_enhanced.txt`：
+
+```
+原句:    I'm not going to lie: the PyTorch codebase can be a bit overwhelming at times.
+增强后:  I'm not going to lie: [short pause] the PyTorch codebase can be a bit [emphasis]overwhelming at times.
+```
+
+可断点续跑：缓存在 `enhancements.json`，重跑只补缺。后续 `article tts --backend fish` 会自动用这份增强后的文本（`--use-enhanced` 默认 `auto`），LRC 字幕仍展示原句。
+
 ## 7. 合并音频 — `article merge`
 
 ```bash
@@ -236,15 +308,46 @@ uv run blog-voice article lrc pytorch-internals --include-metadata
 uv run blog-voice article lrc pytorch-internals --translate-zh --include-metadata
 ```
 
-## 9. 全流程一把梭 — `article pipeline`
+## 8.5. 音频校验 — `article verify`
 
-`split-text` → `tts` → `merge` → `lrc`：
+把每条 `audio/####.wav` 和原句一起发给支持音频输入的多模态模型，让它判断"读对了吗 / 自然吗"，结果写到 `articles/<slug>/verify_report.json`：
 
 ```bash
+uv run blog-voice article verify pytorch-internals \
+  --model google/gemini-3.5-flash --concurrency 5 --language English
+```
+
+报告里每条记录长这样：
+```json
+{
+  "index": 1, "audio": "0001.wav",
+  "sentence": "PyTorch internals May 16, 2019",
+  "ok": true, "matches_text": true, "naturalness": 5,
+  "transcription": "PyTorch internals, May 16, 2019",
+  "issues": []
+}
+```
+
+末尾汇总 `passed / total` 和 `failed_indexes`，可断点续跑：已校验的句子在 `verify_report.json` 里、重跑只补新生成的。
+
+## 9. 全流程一把梭 — `article pipeline`
+
+`split-text` → (`enhance`) → `tts` → `merge` → `lrc` → (`verify`)，方括号项用 flag 开启：
+
+```bash
+# chatterbox + 中文字幕
 uv run blog-voice article pipeline pytorch-internals \
   --backend chatterbox --device cuda \
-  --ref voices_split/爱弥斯/normal/104_滑翔.wav \
+  --ref voices_split/爱弥斯/refs/lively_20s.wav \
   --gap 0.3 --translate-zh --include-metadata
+
+# fish + 标签增强 + 字幕翻译 + 音频校验
+uv run blog-voice article pipeline pytorch-internals \
+  --backend fish \
+  --enhance --enhance-model deepseek/deepseek-v4-pro \
+  --translate-zh --translation-model deepseek/deepseek-v4-flash \
+  --verify --verify-model google/gemini-3.5-flash \
+  --include-metadata
 ```
 
 ## 目录结构
@@ -257,20 +360,26 @@ blog-voice/
 ├── src/blog_voice/
 │   ├── cli.py              # 总入口 (argparse 子命令)
 │   ├── paths.py            # ArticlePaths + ArticleMeta
+│   ├── llm/zenmux.py       # ZenMux OpenAI-compatible 客户端
 │   ├── voices/             # scrape / classify / split
-│   ├── text/sentences.py   # 切句
+│   ├── text/               # sentences (切句) + enhance (Fish 标签注入)
 │   ├── tts/                # base / chatterbox / fish_audio / runner
 │   ├── audio/merge.py      # 合并 wav
-│   └── subtitle/lrc.py     # 生成 LRC（含 DeepSeek 翻译）
+│   ├── subtitle/lrc.py     # 生成 LRC（走 ZenMux 翻译）
+│   └── verify/audio.py     # 多模态 LLM 音频 QA
 ├── voices/<角色>/          # 原始抓取
 ├── voices_split/<角色>/    # 拆分后的 normal/mecha
 ├── articles/<slug>/        # 每篇文章一目录
-│   ├── meta.json           # 默认 ref / backend / artist 等
+│   ├── meta.json                  # 默认 ref / backend / artist 等
 │   ├── source.txt
-│   ├── sentences.txt
+│   ├── sentences.txt              # 原始切句（LRC、verify 都用这版）
+│   ├── sentences_enhanced.txt     # fish 标签增强版（fish TTS 自动读）
+│   ├── enhancements.json          # 增强缓存（断点续跑）
 │   ├── audio/####.wav
 │   ├── merged.wav
-│   └── subtitle.lrc
+│   ├── subtitle.lrc
+│   ├── translations_zh.json       # 翻译缓存
+│   └── verify_report.json         # 音频 QA 报告
 └── .model-cache/           # chatterbox 权重缓存
 ```
 
@@ -278,5 +387,6 @@ blog-voice/
 
 - **TTS 输出格式不一致**：chatterbox 默认写 IEEE_FLOAT 32-bit，fish 默认 PCM；`article merge` 走 `soundfile` 统一读，输出 16-bit PCM。
 - **fish 后端的 ref 转录**：第一次用本地 wav 做参考会调用 fish ASR 转录中文台词、缓存在 `<ref>.transcript.txt`。ASR 不理想时可手工编辑这个文件。
-- **缩写/符号/版本号**：技术博客 TTS 最大的坑。本仓库目前没做术语预处理；如果听感不行，按 voice.md §3 做 LLM 预处理（展开缩写、删代码块、规范标点）。
-- **copyright**：`voices/`、`voices_split/`、`articles/*/source.txt` 等用户内容已 gitignore，不要推到公开仓库。
+- **ZenMux 免费配额很紧**：跑全文翻译 / 增强（250 句 × 2 ≈ 500 次调用）可能就把 rolling window 耗光，会返回 HTTP 402 `quote_exceeded`。配 `DEEPSEEK_API_KEY` 后纯文本部分自动兜底；音频校验（Gemini）没有兜底，撞了只能等配额刷新或升级 ZenMux 套餐。
+- **缩写/符号/版本号**：技术博客 TTS 最大的坑。已通过 `article enhance` 给 fish 加 `[break]/[emphasis]` 缓解部分节奏问题，但术语展开（`API → A P I`、`v2.5.1 → version two point five point one`）仍未做。如听感不行，参考 voice.md §3 做 LLM 预处理后再喂给 TTS。
+- **copyright**：`voices/`、`voices_split/`、`articles/*/source.txt` / `sentences*.txt` / `audio/` / `merged.wav` / `subtitle.lrc` 等用户内容已 gitignore（看 `.gitignore`），不要推到公开仓库；只有 `meta.json` + `voice_labels.json` 这些"配置/标注"文件会被跟踪。

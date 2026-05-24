@@ -4,6 +4,6 @@
   "album": "blog-voice",
   "ref_voice": "voices_split/爱弥斯/refs/lively_20s.wav",
   "backend": "chatterbox",
-  "fish_reference_id": "",
+  "fish_reference_id": "bae505f2dba94936a09fa943ecfc5304",
   "source_url": "https://blog.ezyang.com/2019/05/pytorch-internals/"
 }
