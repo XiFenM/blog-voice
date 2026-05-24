@@ -5,8 +5,8 @@ then finds the optimal split point for mixed files by scanning with a
 sliding-window classifier.
 """
 
-import argparse
 import json
+import shutil
 from pathlib import Path
 
 import librosa
@@ -116,7 +116,6 @@ def _scan_labels(
     window_s: float = 0.5,
     hop_s: float = 0.05,
 ) -> np.ndarray:
-    """Return an array of binary labels (0=normal, 1=mecha) on a fine grid."""
     win = int(window_s * sr)
     hop = int(hop_s * sr)
     labels: list[int] = []
@@ -124,10 +123,7 @@ def _scan_labels(
         seg = y[start : start + win]
         f = _features(seg, sr)
         if f is None:
-            if labels:
-                labels.append(labels[-1])
-            else:
-                labels.append(0)
+            labels.append(labels[-1] if labels else 0)
             continue
         fs = scaler.transform(f.reshape(1, -1))
         pred = km.predict(fs)[0]
@@ -144,12 +140,6 @@ def find_transition(
     mecha_cluster: int,
     normal_first: bool = True,
 ) -> int | None:
-    """Find the split point that best separates the two modes.
-
-    Scans the audio with overlapping windows, then finds the single split
-    point (sample index) that minimizes misclassifications assuming the
-    left side is one mode and the right side the other.
-    """
     labels = _scan_labels(y, sr, scaler, km, normal_cluster, mecha_cluster)
     if len(labels) < 4:
         return None
@@ -181,13 +171,20 @@ def write_segment(
     sf.write(target, y, sr, subtype="PCM_16")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--labels", default="voice_labels.json")
-    parser.add_argument("--sr", type=int, default=22050)
-    args = parser.parse_args()
+def _copy_transcript(src_wav: Path, dest_wav: Path) -> None:
+    """Copy the sibling transcript file (if any) next to the destination wav.
 
-    labels = json.loads(Path(args.labels).read_text(encoding="utf-8"))
+    Only meaningful when the audio is copied whole — for split segments the
+    original transcript no longer matches a partial clip.
+    """
+    src_txt = src_wav.with_suffix(src_wav.suffix + ".transcript.txt")
+    if src_txt.exists():
+        dest_txt = dest_wav.with_suffix(dest_wav.suffix + ".transcript.txt")
+        shutil.copyfile(src_txt, dest_txt)
+
+
+def split_voices(labels_path: Path, sr: int) -> None:
+    labels = json.loads(labels_path.read_text(encoding="utf-8"))
     voice_dir = Path(labels["voice_dir"])
     out_dir = Path(labels["out_dir"])
 
@@ -200,47 +197,47 @@ def main() -> None:
     stats = {"normal": 0, "mecha": 0, "split": 0}
 
     scaler, km, normal_cluster, mecha_cluster = build_model(
-        voice_dir, labels["pure_normal"], labels["pure_mecha"], args.sr
+        voice_dir, labels["pure_normal"], labels["pure_mecha"], sr
     )
+
+    manual_ratios = labels.get("manual_split_ratios", {})
 
     for num, path in files.items():
         if num in labels["pure_normal"]:
-            y, sr = librosa.load(path, sr=args.sr, mono=True)
-            sf.write(normal_dir / path.name, y, sr, subtype="PCM_16")
+            dest = normal_dir / path.name
+            shutil.copyfile(path, dest)
+            _copy_transcript(path, dest)
             stats["normal"] += 1
         elif num in labels["pure_mecha"]:
-            y, sr = librosa.load(path, sr=args.sr, mono=True)
-            sf.write(mecha_dir / path.name, y, sr, subtype="PCM_16")
+            dest = mecha_dir / path.name
+            shutil.copyfile(path, dest)
+            _copy_transcript(path, dest)
             stats["mecha"] += 1
         elif num in labels["split_normal_then_mecha"]:
-            y, sr = librosa.load(path, sr=args.sr, mono=True)
-            manual = labels.get("manual_split_ratios", {}).get(str(num))
+            y, sample_rate = librosa.load(path, sr=sr, mono=True)
+            manual = manual_ratios.get(str(num))
             if manual is not None:
                 split = int(len(y) * manual)
             else:
-                split = find_transition(y, sr, scaler, km, normal_cluster, mecha_cluster, normal_first=True)
+                split = find_transition(y, sample_rate, scaler, km, normal_cluster, mecha_cluster, normal_first=True)
             if split is None or split <= 0 or split >= len(y):
                 split = int(len(y) * 0.5)
-            write_segment(normal_dir, path, "a", 1, y[:split], sr)
-            write_segment(mecha_dir, path, "b", 1, y[split:], sr)
+            write_segment(normal_dir, path, "a", 1, y[:split], sample_rate)
+            write_segment(mecha_dir, path, "b", 1, y[split:], sample_rate)
             stats["split"] += 1
         elif num in labels["split_mecha_then_normal"]:
-            y, sr = librosa.load(path, sr=args.sr, mono=True)
-            manual = labels.get("manual_split_ratios", {}).get(str(num))
+            y, sample_rate = librosa.load(path, sr=sr, mono=True)
+            manual = manual_ratios.get(str(num))
             if manual is not None:
                 split = int(len(y) * manual)
             else:
-                split = find_transition(y, sr, scaler, km, normal_cluster, mecha_cluster, normal_first=False)
+                split = find_transition(y, sample_rate, scaler, km, normal_cluster, mecha_cluster, normal_first=False)
             if split is None or split <= 0 or split >= len(y):
                 split = int(len(y) * 0.5)
-            write_segment(mecha_dir, path, "a", 1, y[:split], sr)
-            write_segment(normal_dir, path, "b", 1, y[split:], sr)
+            write_segment(mecha_dir, path, "a", 1, y[:split], sample_rate)
+            write_segment(normal_dir, path, "b", 1, y[split:], sample_rate)
             stats["split"] += 1
 
     copied = stats["normal"] + stats["mecha"]
     print(f"copied {copied} pure files ({stats['normal']} normal, {stats['mecha']} mecha)")
     print(f"split {stats['split']} mixed files -> {out_dir}/normal/ and {out_dir}/mecha/")
-
-
-if __name__ == "__main__":
-    main()

@@ -1,14 +1,5 @@
-"""Scrape character voice audio from the Wuthering Waves wiki (wiki.kurobbs.com).
+"""Scrape character voice audio from the Wuthering Waves wiki (wiki.kurobbs.com)."""
 
-Usage:
-    python scrape_voices.py <character-id-or-url> [--out DIR]
-
-Examples:
-    python scrape_voices.py 1457744312692867072
-    python scrape_voices.py https://wiki.kurobbs.com/mc/item/1457744312692867072
-"""
-
-import argparse
 import json
 import re
 import sys
@@ -49,7 +40,11 @@ def collect_audio(node, out):
     if isinstance(node, dict):
         url = node.get("playUrl")
         if url and url.endswith((".wav", ".mp3", ".ogg", ".m4a")):
-            out.append({"title": node.get("audioTitle") or "untitled", "url": url})
+            out.append({
+                "title": node.get("audioTitle") or "untitled",
+                "url": url,
+                "text": (node.get("content") or "").strip(),
+            })
         for v in node.values():
             collect_audio(v, out)
     elif isinstance(node, list):
@@ -61,6 +56,18 @@ def safe_name(s: str) -> str:
     return re.sub(r'[\\/:*?"<>|]+', "_", s).strip()
 
 
+def _write_transcript(wav_path: Path, text: str) -> None:
+    """Write the spoken-content transcript next to the wav.
+
+    Filename matches what fish_audio.py looks for (<wav>.transcript.txt) so
+    the fish backend can skip its ASR call entirely.
+    """
+    if not text:
+        return
+    transcript_path = wav_path.with_suffix(wav_path.suffix + ".transcript.txt")
+    transcript_path.write_text(text + "\n", encoding="utf-8")
+
+
 def download(entries, out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
     with httpx.Client(timeout=60, follow_redirects=True) as client:
@@ -68,7 +75,9 @@ def download(entries, out_dir: Path):
             ext = Path(urlparse(e["url"]).path).suffix or ".wav"
             fname = f"{i:03d}_{safe_name(e['title'])}{ext}"
             dest = out_dir / fname
+            text = e.get("text", "")
             if dest.exists() and dest.stat().st_size > 0:
+                _write_transcript(dest, text)
                 print(f"  [skip] {fname}")
                 continue
             for attempt in range(3):
@@ -76,34 +85,30 @@ def download(entries, out_dir: Path):
                     with client.stream("GET", e["url"]) as resp:
                         resp.raise_for_status()
                         dest.write_bytes(resp.read())
+                    _write_transcript(dest, text)
                     print(f"  [ok]   {fname}  ({dest.stat().st_size} bytes)")
                     break
                 except Exception as ex:
-                    print(f"  [retry {attempt+1}] {fname}: {ex}")
+                    print(f"  [retry {attempt + 1}] {fname}: {ex}")
                     time.sleep(1)
             else:
                 print(f"  [fail] {fname}")
 
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("target", help="character id or wiki url")
-    p.add_argument("--out", default="voices", help="output directory root")
-    args = p.parse_args()
-
-    entry_id = resolve_id(args.target)
+def scrape(target: str, out_root: Path) -> Path:
+    entry_id = resolve_id(target)
     print(f"fetching entry {entry_id}…")
     data = fetch_entry(entry_id)
     name = data.get("name") or entry_id
     print(f"character: {name}")
 
-    entries = []
+    entries: list[dict] = []
     collect_audio(data, entries)
     print(f"found {len(entries)} audio clips")
     if not entries:
-        return
+        return out_root
 
-    out_dir = Path(args.out) / safe_name(name)
+    out_dir = out_root / safe_name(name)
     print(f"downloading to {out_dir}…")
     download(entries, out_dir)
 
@@ -116,7 +121,4 @@ def main():
         )
     )
     print(f"manifest: {manifest}")
-
-
-if __name__ == "__main__":
-    main()
+    return out_dir

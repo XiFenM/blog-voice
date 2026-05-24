@@ -9,27 +9,27 @@ wheels/
 # Virtual environments
 .venv
 
-# playwright-cli local state + installed skills (re-run `playwright-cli install --skills`)
+# playwright-cli local state + installed skills
 .playwright/
 .playwright-cli/
 .claude/
 .opencode/
-.model-cache/
 opencode.json
-**.mp3
-**.lrc
-**.txt
-**.m4a
-**.wav
 .env
-# Copyrighted material — do not redistribute
-voices/
-tts_out/
-pytorch_internals_raw.txt
-pytorch_internals_sentences.txt
 
-# Generated logs
+# Local model weights (downloaded on first run)
+.model-cache/
+
+# Copyrighted material — do not redistribute
+/voices/
+/voices_split/
+/articles/*/source.txt
+/articles/*/sentences.txt
+/articles/*/audio/
+/articles/*/merged.wav
+/articles/*/subtitle.lrc
+/articles/*/translations_zh.json
+
+# Generated logs / reports
 tts_run.log
-translations_zh.json
 voice_mode_report.tsv
-voices_split/

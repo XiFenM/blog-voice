@@ -1,6 +1,5 @@
 """Classify and optionally split character voice clips by rough timbre mode."""
 
-import argparse
 import csv
 from pathlib import Path
 
@@ -71,24 +70,15 @@ def write_segment(out_dir: Path, mode: str, source: Path, index: int, y: np.ndar
     sf.write(target, y, sr, subtype="PCM_16")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--voice-dir", default="voices/爱弥斯")
-    parser.add_argument("--out", default="voice_mode_report.tsv")
-    parser.add_argument("--split-dir", default="voices_split/爱弥斯")
-    parser.add_argument("--split", action="store_true", help="write detected speech segments by predicted mode")
-    parser.add_argument("--sr", type=int, default=22050)
-    parser.add_argument(
-        "--normal-anchor-max-index",
-        type=int,
-        default=31,
-        help="files up to this numeric prefix are used to identify the normal cluster",
-    )
-    parser.add_argument("--normal-threshold", type=float, default=0.8)
-    parser.add_argument("--mecha-threshold", type=float, default=0.2)
-    args = parser.parse_args()
-
-    voice_dir = Path(args.voice_dir)
+def classify(
+    voice_dir: Path,
+    report_path: Path,
+    split_dir: Path | None,
+    sr: int,
+    normal_anchor_max_index: int,
+    normal_threshold: float,
+    mecha_threshold: float,
+) -> None:
     files = sorted(voice_dir.glob("*.wav"))
     if not files:
         raise SystemExit(f"no wav files found in {voice_dir}")
@@ -98,11 +88,11 @@ def main() -> None:
     file_segment_indexes: dict[Path, list[int]] = {}
 
     for path in files:
-        y, sr = librosa.load(path, sr=args.sr, mono=True)
-        audio[path] = (y, sr)
+        y, sample_rate = librosa.load(path, sr=sr, mono=True)
+        audio[path] = (y, sample_rate)
         indexes = []
-        for start, end in speech_intervals(y, sr):
-            features = segment_features(y[start:end], sr)
+        for start, end in speech_intervals(y, sample_rate):
+            features = segment_features(y[start:end], sample_rate)
             if features is None:
                 continue
             indexes.append(len(segments))
@@ -120,14 +110,14 @@ def main() -> None:
     anchor_labels = [
         labels[index]
         for path in files
-        if numeric_prefix(path) <= args.normal_anchor_max_index
+        if numeric_prefix(path) <= normal_anchor_max_index
         for index in file_segment_indexes[path]
     ]
     if not anchor_labels:
         raise SystemExit("normal anchor produced no speech segments")
     normal_label = max(set(anchor_labels), key=anchor_labels.count)
 
-    with Path(args.out).open("w", encoding="utf-8", newline="") as report_file:
+    with report_path.open("w", encoding="utf-8", newline="") as report_file:
         writer = csv.writer(report_file, delimiter="\t")
         writer.writerow([
             "file",
@@ -138,31 +128,27 @@ def main() -> None:
             "segment_modes",
         ])
         for path in files:
-            y, sr = audio[path]
+            y, sample_rate = audio[path]
             indexes = file_segment_indexes[path]
             segment_labels = ["normal" if labels[index] == normal_label else "mecha" for index in indexes]
             normal_ratio = segment_labels.count("normal") / len(segment_labels) if segment_labels else 0.0
-            file_mode = mode_from_ratio(normal_ratio, args.normal_threshold, args.mecha_threshold)
+            file_mode = mode_from_ratio(normal_ratio, normal_threshold, mecha_threshold)
             timed_modes = []
             for segment_number, index in enumerate(indexes, start=1):
                 _, start, end, _ = segments[index]
                 mode = segment_labels[segment_number - 1]
-                timed_modes.append(f"{start / sr:.2f}-{end / sr:.2f}:{mode}")
-                if args.split:
-                    write_segment(Path(args.split_dir), mode, path, segment_number, y[start:end], sr)
+                timed_modes.append(f"{start / sample_rate:.2f}-{end / sample_rate:.2f}:{mode}")
+                if split_dir is not None:
+                    write_segment(split_dir, mode, path, segment_number, y[start:end], sample_rate)
             writer.writerow([
                 path.name,
-                f"{len(y) / sr:.2f}",
+                f"{len(y) / sample_rate:.2f}",
                 len(indexes),
                 f"{normal_ratio:.2f}",
                 file_mode,
                 " ".join(timed_modes),
             ])
 
-    print(f"wrote {args.out}; segments={len(segments)}")
-    if args.split:
-        print(f"wrote split segments to {args.split_dir}")
-
-
-if __name__ == "__main__":
-    main()
+    print(f"wrote {report_path}; segments={len(segments)}")
+    if split_dir is not None:
+        print(f"wrote split segments to {split_dir}")

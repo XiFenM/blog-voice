@@ -1,18 +1,23 @@
 # blog-voice
 
-把英文技术博客转成"任意角色音色"的语音音频。当前实例：用《鸣潮》角色**爱弥斯**的音色朗读 ezyang 的 *PyTorch internals*。
+把英文技术博客转成"任意角色音色"的语音音频 + 双语 LRC 字幕。当前实例：用《鸣潮》角色**爱弥斯**的音色朗读 ezyang 的 *PyTorch internals*。
 
-整个流水线分三段：
+整个流水线：
 
 ```
-wiki.kurobbs.com ──► scrape_voices.py ──► voices/<角色>/*.wav  (参考音色库)
-ezyang's blog    ──► split_sentences.py ─► pytorch_internals_sentences.txt
-        ┌──────────────────────────────────┘
-        ▼
-generate_tts.py (Chatterbox + 参考音色) ──► tts_out/####.wav
+wiki.kurobbs.com ──► voice scrape ──► voices/<角色>/*.wav (参考音色库)
+                                  └─► voice split ──► voices_split/<角色>/{normal,mecha}/
+
+blog URL  ──► (playwright eval) ──► articles/<slug>/source.txt
+              └─► article split-text ──► articles/<slug>/sentences.txt
+              └─► article tts        ──► articles/<slug>/audio/####.wav   (chatterbox 本地 / fish API)
+              └─► article merge      ──► articles/<slug>/merged.wav
+              └─► article lrc        ──► articles/<slug>/subtitle.lrc     (可加 --translate-zh)
 ```
 
-## 环境
+每篇文章一个目录，自带 `meta.json` 存默认 ref 音色和后端选择，所以同时跑多篇互不打架。
+
+## 安装
 
 ### 前置工具
 
@@ -26,14 +31,12 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ```bash
 npm install -g @playwright/cli@latest
-playwright-cli install --skills    # 安装配套的 Claude Code skill
+playwright-cli install --skills
 ```
 
-**3. 本机 Chrome 开启远程调试 + 端口转发到远程机器**
+**3. 本机 Chrome 调试端口 + SSH 端口转发**（仅当 playwright-cli 跑在远程开发机时）
 
-> 仅当 playwright-cli 跑在远程开发机、Chrome 在本机时需要。如果两者同机可跳过。
-
-本机完全退出 Chrome 后用调试端口启动：
+本机退出 Chrome 后用调试端口启动：
 
 ```bash
 # macOS
@@ -44,127 +47,236 @@ google-chrome --remote-debugging-port=9222
 & "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
 ```
 
-验证：本机浏览器打开 `http://localhost:9222/json/version` 看到 JSON。
+`~/.ssh/config` 加 `RemoteForward 9222 localhost:9222`，VSCode Remote-SSH 会复用。验证：远程机上 `curl http://localhost:9222/json/version` 拿到 JSON。
 
-把 9222 转到远程开发机。在本机 `~/.ssh/config` 加 `RemoteForward`：
+连上：
 
-```sshconfig
-Host my-dev-box
-  HostName <ip>
-  User root
-  IdentityFile ~/.ssh/id_ed25519
-  RemoteForward 9222 localhost:9222
-  ServerAliveInterval 30
-  ServerAliveCountMax 3
-```
-
-VSCode Remote-SSH 会复用这份 config，连接后自动建好转发。验证：远程机上 `curl http://localhost:9222/json/version` 拿到 JSON。
-
-之后用：
 ```bash
 playwright-cli attach --cdp=http://localhost:9222
 ```
 
 ### Python 依赖
 
-uv 管理的 Python 3.12 虚拟环境，依赖见 `pyproject.toml`：
-- `httpx`（API 抓取）
-- `chatterbox-tts`、`torch`、`torchaudio`（TTS）
-
 ```bash
-uv sync           # 安装全部依赖
+uv sync   # 装全部依赖 + 注册 `blog-voice` CLI 入口
 ```
 
-## 1. 抓角色语音 — `scrape_voices.py`
+### `.env` 配置（按需）
 
-直接调用库街区 wiki 的开放 API（`POST /wiki/core/catalogue/item/getEntryDetail`），无需登录，无需浏览器。
+复制 `.env.example` 到 `.env`，按需填：
+
+- `DEEPSEEK_API_KEY=...` —— `article lrc --translate-zh` 走 DeepSeek 翻译时需要
+- `FISH_API_KEY=...` —— TTS 后端选 `fish` 时需要，[在这里申请](https://fish.audio/app/api-keys/)
+- `HF_ENDPOINT=https://hf-mirror.com` —— chatterbox 后端首次下载模型走镜像（可选）
+
+## CLI 总览
+
+`uv run blog-voice` 是统一入口，按领域分两组：
+
+| 子命令 | 作用 |
+|---|---|
+| `voice scrape <id-or-url>` | 从 wiki.kurobbs.com 抓某角色全部语音到 `voices/<角色>/` |
+| `voice classify` | 无监督 KMeans 把单角色音色聚成两类，输出 TSV 报告 |
+| `voice split` | 用手工标的 [voice_labels.json](voice_labels.json) 拆分混合片段到 `voices_split/<角色>/{normal,mecha}/` |
+| `article add <slug> --source FILE` | 创建 `articles/<slug>/`，写入 `source.txt` + `meta.json` |
+| `article split-text <slug>` | 切句到 `sentences.txt` |
+| `article tts <slug>` | 每句生成一个 wav 到 `audio/####.wav`，支持断点续跑 |
+| `article merge <slug>` | 拼成单个 `merged.wav` |
+| `article lrc <slug>` | 生成 `subtitle.lrc`，`--translate-zh` 给每句加一行中文翻译 |
+| `article pipeline <slug>` | 串起 split-text + tts + merge + lrc 一把梭 |
+
+每个子命令 `--help` 看完整参数。
+
+## 1. 抓角色语音 — `voice scrape`
+
+直接调 wiki 开放 API（`POST /wiki/core/catalogue/item/getEntryDetail`），无登录、无浏览器。
 
 ```bash
-# 用 wiki URL
-uv run python scrape_voices.py https://wiki.kurobbs.com/mc/item/1457744312692867072
-
+# 用 URL
+uv run blog-voice voice scrape https://wiki.kurobbs.com/mc/item/1457744312692867072
 # 或直接给 ID
-uv run python scrape_voices.py 1457744312692867072 --out voices
+uv run blog-voice voice scrape 1457744312692867072 --out voices
 ```
 
 产出：
-- `voices/<角色名>/###_<标题>.wav` — 全部音频（爱弥斯共 116 条）
-- `voices/<角色名>/manifest.json` — 完整索引
+- `voices/<角色名>/###_<标题>.wav` —— 全部音频（爱弥斯共 116 条）
+- `voices/<角色名>/###_<标题>.wav.transcript.txt` —— 每条音频对应的中文台词（从 wiki `content` 字段抓的）
+- `voices/<角色名>/manifest.json` —— 完整索引（含 `text` 字段）
 
-换其他角色只需替换 ID（在 wiki 角色页 URL 里 `/item/` 后那串数字）。
+换角色只需替换 ID（在 wiki 角色页 URL 里 `/item/` 后那串数字）。重跑 scrape 是幂等的——音频已存在会跳过下载，但 transcript / manifest 会重新写一遍，可以用来给旧的语音库补上文字。
 
-## 2. 抓博客文本 + 切句 — `split_sentences.py`
+## 2. 区分角色不同音色模式 — `voice split`
 
-**先抓文本**（一次性，已完成；如换博客重做）：
+爱弥斯有"常态"和"机甲"两种音色，混在 116 条里。流程：
+
+1. **手工标注**：听一遍后填好 [voice_labels.json](voice_labels.json)：
+   - `pure_normal` / `pure_mecha` —— 纯一种音色的文件编号
+   - `split_normal_then_mecha` / `split_mecha_then_normal` —— 中途切换音色的文件编号
+   - `manual_split_ratios` —— 算法切偏时手工指定切点（0–1 比例）
+
+2. **跑切分**：
+
+   ```bash
+   uv run blog-voice voice split
+   ```
+
+   - 用 pure_* 文件训练参考模型（MFCC + 谱特征 + KMeans，约 84% 准确率），打印分类准确率
+   - 纯文件直接复制
+   - 混合文件用滑窗扫描 + 误分类最小化找最佳切点，按方向切成两段
+   - 输出到 `voices_split/<角色>/{normal,mecha}/`
+
+也可以用无监督版本快速摸底（不需要先标注）：
 
 ```bash
-playwright-cli attach --cdp=http://localhost:9222   # 连本机 Chrome（需 --remote-debugging-port=9222 启动）
+uv run blog-voice voice classify --voice-dir voices/爱弥斯 --split
+```
+
+## 3. 抓博客文本 — playwright-cli
+
+```bash
+playwright-cli attach --cdp=http://localhost:9222
 playwright-cli goto https://blog.ezyang.com/2019/05/pytorch-internals/
-playwright-cli --raw eval "() => document.querySelector('article.post').innerText" > pytorch_internals_raw.txt
+playwright-cli --raw eval "() => document.querySelector('article.post').innerText" > /tmp/blog.txt
 ```
 
-**再切句**：
+注意：`--raw eval` 的输出第一行是 **JSON 编码字符串**（带字面 `\n`），不是 plaintext。`split-text` 内部会 `json.loads(first_line)` 解码。
+
+## 4. 录入文章 — `article add`
 
 ```bash
-uv run python split_sentences.py
+uv run blog-voice article add pytorch-internals \
+  --source /tmp/blog.txt \
+  --title "PyTorch internals" \
+  --artist 爱弥斯 \
+  --ref-voice voices_split/爱弥斯/normal/104_滑翔.wav \
+  --backend chatterbox
 ```
 
-输出 `pytorch_internals_sentences.txt`，每句一段，段间一空行；常见英文缩写（Mr./e.g./No./Inc. 等）已加白名单防误切。
+会创建：
+```
+articles/pytorch-internals/
+├── meta.json     # 标题、音色、后端等默认配置
+├── source.txt    # 拷贝自 --source
+└── audio/        # （此时为空）
+```
 
-## 3. 生成语音 — `generate_tts.py`
-
-Chatterbox-TTS，5–20s 参考音频 → 克隆音色。爱弥斯里已挑了 [voices/爱弥斯/022_自我介绍.wav](voices/爱弥斯/022_自我介绍.wav)（10.6s 纯独白）作默认参考。
+## 5. 切句 — `article split-text`
 
 ```bash
-# CPU 默认；GPU 加 --device cuda
-uv run python generate_tts.py
-uv run python generate_tts.py --device cuda
-
-# 其他参数
-uv run python generate_tts.py \
-  --sentences pytorch_internals_sentences.txt \
-  --ref voices/爱弥斯/022_自我介绍.wav \
-  --out tts_out \
-  --limit 5            # 只跑前 N 句做试听
+uv run blog-voice article split-text pytorch-internals
 ```
 
-每句一个 wav 写到 `tts_out/####.wav`，**断点续跑**：已存在的文件直接跳过，所以可以随时 Ctrl-C 后再重启。
+写 `articles/pytorch-internals/sentences.txt`，每句一段、段间一空行。常见英文缩写（Mr./e.g./No./Inc. …）已加白名单。
 
-### 性能参考
+## 6. 生成语音 — `article tts`
 
-| 环境 | rt 倍率 | 全文 250 句（约 17 分钟音频）耗时 |
+两种后端，按 `meta.json` 或命令行 `--backend` 选：
+
+### A. chatterbox（本地）
+
+权重首次自动下载到 `.model-cache/chatterbox/`，约 1.8 GB。每句都用同一份 ref，防自回归漂移。
+
+```bash
+# 默认 cpu、用 meta.json 里的 ref；先 limit 5 试听
+uv run blog-voice article tts pytorch-internals --limit 5
+
+# GPU
+uv run blog-voice article tts pytorch-internals --device cuda
+
+# 临时换 ref
+uv run blog-voice article tts pytorch-internals \
+  --ref voices_split/爱弥斯/normal/022_自我介绍.wav --limit 5
+```
+
+### B. fish-audio（API，免 GPU）
+
+需要 `FISH_API_KEY`。两种参考方式：
+
+- `--ref voices_split/...wav` —— 本地 wav 直接做零样本克隆。fish API 要求 ref 配一段对应文本：如果 wav 旁边已经有 `<wav>.transcript.txt`（`voice scrape` 抓 wiki 时已经自动写好，纯文件被 `voice split` 复制时也带走），直接用；否则脚本会自动调 fish ASR 转录、缓存在同样的文件名下，`--fish-ref-language zh` 指定语言。手工编辑这个 txt 文件下次会被尊重。
+- `--fish-reference-id <id>` —— 在 fish.audio 上已经上传/保存好的 voice model id，最快最稳，长跑首选。
+
+```bash
+uv run blog-voice article tts pytorch-internals \
+  --backend fish \
+  --ref voices_split/爱弥斯/normal/104_滑翔.wav \
+  --fish-ref-language zh \
+  --limit 5
+
+# 或用预存的 voice id
+uv run blog-voice article tts pytorch-internals \
+  --backend fish --fish-reference-id 802e3bc2b27e49c2995d23ef70e6ac89
+```
+
+### 通用
+
+每句一个 wav 写到 `audio/####.wav`，**断点续跑**：已存在的非空文件跳过，可随时 Ctrl-C 后再重启。
+
+| 后端 / 环境 | rt 倍率 | 全文 250 句（≈17 分钟音频）耗时 |
 |---|---|---|
-| 这台 4 核 CPU、无 GPU | ~10–20× 慢于实时 | 3–6 小时 |
-| 任意 6–8 GB VRAM 的 GPU（参考 voice.md） | ~0.3–0.5× 实时 | 5–15 分钟 |
+| chatterbox / 4 核 CPU | ~10–20× 慢于实时 | 3–6 小时 |
+| chatterbox / 6–8 GB VRAM GPU | ~0.3–0.5× 实时 | 5–15 分钟 |
+| fish-audio API | ~0.5–1× 实时 | 视并发，几分钟到十几分钟 |
 
-CPU 下推荐先 `--limit 5` 试听一遍再决定参考音色和参数。
+## 7. 合并音频 — `article merge`
 
-### 换参考音色的挑选标准
+```bash
+uv run blog-voice article merge pytorch-internals          # 直接拼
+uv run blog-voice article merge pytorch-internals --gap 0.3 # 句间加 0.3s 静音
+```
 
-参考 voice.md 第 1 条："10–15s、无背景噪音、语调自然"。在 `voices/爱弥斯/` 里几条已经验证合适的：
-- `022_自我介绍.wav` — 10.6s
-- `021_闲趣3.wav` — 14.8s
-- `030_突破4.wav` — 10.1s
-- `031_突破5.wav` — 15.9s
+输出 `articles/<slug>/merged.wav`（16-bit PCM）。
 
-战斗类语音多带音效或喊叫，不适合做 reference。
+## 8. 生成字幕 — `article lrc`
 
-## 文件清单
+```bash
+# 纯英文
+uv run blog-voice article lrc pytorch-internals --include-metadata
 
-| 文件 | 说明 |
-|---|---|
-| `scrape_voices.py` | 角色语音抓取（API 直连） |
-| `split_sentences.py` | 博客文本切句 |
-| `generate_tts.py` | Chatterbox TTS 生成（支持断点续跑、CPU/GPU 切换） |
-| `voice.md` | TTS 选型 & 工程建议（开源 vs 托管、参考音频准备、术语预处理等） |
-| `voices/<角色>/` | 抓回来的语音库 |
-| `pytorch_internals_raw.txt` | 博客 innerText（playwright eval 输出，JSON 转义） |
-| `pytorch_internals_sentences.txt` | 切句后的可朗读文本 |
-| `tts_out/` | TTS 生成结果 |
+# 双语（英文行下面紧跟中文翻译，DeepSeek 翻译，按句缓存到 translations_zh.json）
+uv run blog-voice article lrc pytorch-internals --translate-zh --include-metadata
+```
+
+## 9. 全流程一把梭 — `article pipeline`
+
+`split-text` → `tts` → `merge` → `lrc`：
+
+```bash
+uv run blog-voice article pipeline pytorch-internals \
+  --backend chatterbox --device cuda \
+  --ref voices_split/爱弥斯/normal/104_滑翔.wav \
+  --gap 0.3 --translate-zh --include-metadata
+```
+
+## 目录结构
+
+```
+blog-voice/
+├── pyproject.toml          # `blog-voice` CLI 入口注册在这里
+├── voice_labels.json       # 角色音色人工标注（爱弥斯）
+├── voice.md                # TTS 选型 + 工程建议
+├── src/blog_voice/
+│   ├── cli.py              # 总入口 (argparse 子命令)
+│   ├── paths.py            # ArticlePaths + ArticleMeta
+│   ├── voices/             # scrape / classify / split
+│   ├── text/sentences.py   # 切句
+│   ├── tts/                # base / chatterbox / fish_audio / runner
+│   ├── audio/merge.py      # 合并 wav
+│   └── subtitle/lrc.py     # 生成 LRC（含 DeepSeek 翻译）
+├── voices/<角色>/          # 原始抓取
+├── voices_split/<角色>/    # 拆分后的 normal/mecha
+├── articles/<slug>/        # 每篇文章一目录
+│   ├── meta.json           # 默认 ref / backend / artist 等
+│   ├── source.txt
+│   ├── sentences.txt
+│   ├── audio/####.wav
+│   ├── merged.wav
+│   └── subtitle.lrc
+└── .model-cache/           # chatterbox 权重缓存
+```
 
 ## 已知坑
 
-- Chatterbox 是自回归模型，长文按段调用时**每次都用同一份 reference**，能防止音色漂移（脚本已经这么做）。
-- 技术博客有大量缩写/符号/版本号/代码块，目前**没做术语预处理**。后续如果听感不行，按 voice.md 第 3 条做一遍 LLM 预处理（展开缩写、删代码块、规范标点）效果会更明显。
-- `pytorch_internals_raw.txt` 第一行是个 JSON 字符串（playwright `--raw eval` 的格式），`split_sentences.py` 内做了 `json.loads` 解码，别直接当 plaintext 读。
-- playwright-cli 通过 CDP 连本机 Chrome 需要 Chrome 用 `--remote-debugging-port=9222` 启动 + SSH 端口转发；ssh config 里加 `RemoteForward 9222 localhost:9222`。
+- **TTS 输出格式不一致**：chatterbox 默认写 IEEE_FLOAT 32-bit，fish 默认 PCM；`article merge` 走 `soundfile` 统一读，输出 16-bit PCM。
+- **fish 后端的 ref 转录**：第一次用本地 wav 做参考会调用 fish ASR 转录中文台词、缓存在 `<ref>.transcript.txt`。ASR 不理想时可手工编辑这个文件。
+- **缩写/符号/版本号**：技术博客 TTS 最大的坑。本仓库目前没做术语预处理；如果听感不行，按 voice.md §3 做 LLM 预处理（展开缩写、删代码块、规范标点）。
+- **copyright**：`voices/`、`voices_split/`、`articles/*/source.txt` 等用户内容已 gitignore，不要推到公开仓库。
