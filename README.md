@@ -2,6 +2,16 @@
 
 把英文技术博客转成"任意角色音色"的语音音频 + 双语 LRC 字幕，并用多模态 LLM 校验生成质量。当前实例：用《鸣潮》角色**爱弥斯**的音色朗读 ezyang 的 *PyTorch internals*。
 
+## 项目用途：支撑 5 个月英语听力 / 口语训练
+
+本仓库不是 TTS 玩具，是作者（软件工程师，AI Infra 方向）22 周英语学习计划的**自产教材生成器**：
+
+- 把感兴趣的 AI Infra 英文博客转成"喜欢的音色 + 双语字幕"的音频，散时听 + 精听 + shadowing
+- 每 2–3 周新增 1 篇，22 周累计 8–10 篇 → 一份**完全为自己定制的 AI Infra 听力教材**
+- 配套 LRC 字幕双语，方便在 Apple Music / netease 等支持 LRC 的播放器里同步看
+
+完整学习计划（含基线测试 SOP、5 阶段周节奏、4 套练习 SOP、Anki 卡片模板）见 [English-learn/English-learn.md](English-learn/English-learn.md)。
+
 整个流水线：
 
 ```

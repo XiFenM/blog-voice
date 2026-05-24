@@ -2,6 +2,19 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Why this project exists (read first)
+
+The user is a software engineer (AI Infra direction) running a **22-week (5-month) English listening + speaking improvement plan**. This repo exists to produce custom AI Infra audio teaching material for that plan: every 2–3 weeks the user adds one new AI Infra article and runs the full pipeline → `merged.wav` + `subtitle.lrc` becomes their listening / shadowing material. Expected cadence: **8–10 new articles over the 22 weeks**.
+
+The full plan, including baseline test SOPs, the 5-phase week-by-week schedule, four practice SOPs (美剧 / 口语课 / AI Infra listening / recording review), and the Anki chunk-card template, lives at **[English-learn/English-learn.md](English-learn/English-learn.md)**. Reference materials (`reference-advice*.md`, `AI-infra-podcast.md`) sit alongside it.
+
+What this means for working in this repo:
+
+- When the user asks for a new article, **prefer AI Infra topics** matching the plan (vLLM blog, KV cache, GPU scheduling, inference serving, etc.) over arbitrary tech writing.
+- When suggesting cadence or batch size for new articles, anchor on the plan: **one new article per 2–3 weeks**, not "let's add ten at once."
+- `English-learn/baseline/` (Week 0 + Week 22 test recordings) and `English-learn/weekly/` (weekly logs) are **personal data** — same gitignore treatment as `voices/` and `articles/*/audio/`. The plan markdown itself and reference advice files are fine to commit (general study material, no copyright issue).
+- Voice-related decisions (which ref clip, which 美剧 to use, etc.) have already been made and recorded in the plan — defer to the plan rather than re-recommending from scratch.
+
 ## Pipeline overview
 
 Two pipelines, each driven by the unified `blog-voice` CLI:
@@ -126,6 +139,8 @@ For Fish Audio TTS, the user has pre-uploaded three voice models and stored the 
 
 ## See also
 
+- [English-learn/English-learn.md](English-learn/English-learn.md) — **the 22-week English learning plan this project serves**. Read first when the user mentions article cadence, topic selection, or anything about listening / shadowing.
+- [English-learn/AI-infra-podcast.md](English-learn/AI-infra-podcast.md) — curated AI Infra podcast list mapped to listening phases 3–5 of the plan.
 - [voice.md](voice.md) — TTS model selection rationale, reference-audio prep, technical-term preprocessing advice. Read this before changing TTS engines or trying to improve output quality.
 - [README.md](README.md) — user-facing setup + run instructions for the unified CLI, including the 5-minute quickstart.
 - [voice_labels.json](voice_labels.json) — per-character voice mode labels + Fish Audio `reference_id` registry.

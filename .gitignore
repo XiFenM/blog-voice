@@ -36,3 +36,12 @@ opencode.json
 # Generated logs / reports
 tts_run.log
 voice_mode_report.tsv
+
+# Personal English-learning data (baselines, weekly logs, recordings).
+# Plan + reference advice markdown files at the top of English-learn/ stay tracked.
+/English-learn/baseline/
+/English-learn/weekly/
+/English-learn/recordings/
+/English-learn/*.m4a
+/English-learn/*.wav
+/English-learn/*.mp3
