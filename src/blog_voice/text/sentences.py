@@ -30,6 +30,11 @@ def split_paragraph(paragraph: str) -> list[str]:
     for m in SENT_END.finditer(text):
         end = m.end(2)
         candidate = text[i:end]
+        # Don't split while inside an unclosed parenthesis: a parenthetical
+        # like "(Error checking is really important! Don't skimp on it!)" must
+        # stay whole rather than break at the inner "!" and leave a dangling "(".
+        if candidate.count("(") > candidate.count(")"):
+            continue
         prev_word = re.split(r"[\s(\[]", candidate)[-1].rstrip(".!?\"')]").lower()
         if prev_word in ABBREV:
             continue

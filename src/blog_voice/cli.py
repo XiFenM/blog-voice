@@ -9,30 +9,34 @@ Subcommands grouped by domain:
   article add <slug> --source FILE [--title T] [--artist A] [--backend ...]
                                create articles/<slug>/ and copy in source.txt
   article split-text <slug>    split source.txt into sentences.txt
+  article normalize <slug>     rewrite code symbols/terms into TTS-readable form (both backends)
   article enhance <slug>       inject Fish prosody/emotion tags into sentences (fish backend only)
   article tts <slug> [...]     run the TTS backend over every sentence
   article merge <slug>         concatenate per-sentence wavs into merged.wav
   article lrc <slug> [...]     emit subtitle.lrc, optionally bilingual
   article verify <slug> [...]  use a multimodal LLM to QA each generated wav
-  article pipeline <slug> [...] run split-text + (enhance) + tts + merge + lrc + (verify) end-to-end
+  article pipeline <slug> [...] run split-text + (enhance) + tts + (verify+regen) + merge + lrc end-to-end
 """
 
 import argparse
+import json
 import shutil
 from pathlib import Path
 
 from blog_voice.audio.merge import merge_wavs
 from blog_voice.llm.zenmux import (
     DEFAULT_ENHANCEMENT_MODEL,
+    DEFAULT_NORMALIZATION_MODEL,
     DEFAULT_TRANSLATION_MODEL,
     DEFAULT_VERIFY_MODEL,
 )
 from blog_voice.paths import ArticleMeta, article_paths
 from blog_voice.subtitle.lrc import translate_sentences, write_lrc
 from blog_voice.text.enhance import enhance_sentences, write_enhanced_file
+from blog_voice.text.normalize import normalize_sentences, write_normalized_file
 from blog_voice.text.sentences import split_file
 from blog_voice.tts.runner import read_sentences, run as run_tts
-from blog_voice.verify.audio import verify_article
+from blog_voice.verify.audio import invalidate_indexes, verify_article
 
 
 def _add_voice_subcommands(sub: argparse._SubParsersAction) -> None:
@@ -74,6 +78,13 @@ def _add_article_subcommands(sub: argparse._SubParsersAction) -> None:
     p_split.add_argument("slug")
     p_split.set_defaults(func=_cmd_article_split_text)
 
+    p_normalize = sub.add_parser(
+        "normalize",
+        help="rewrite code symbols / technical terms into TTS-readable form (helps both backends)",
+    )
+    _add_normalize_args(p_normalize)
+    p_normalize.set_defaults(func=_cmd_article_normalize)
+
     p_enhance = sub.add_parser(
         "enhance",
         help="inject Fish Audio prosody/emotion tags into each sentence via LLM (fish backend only)",
@@ -103,18 +114,47 @@ def _add_article_subcommands(sub: argparse._SubParsersAction) -> None:
 
     p_pipe = sub.add_parser(
         "pipeline",
-        help="run split-text + (enhance) + tts + merge + lrc + (verify) in one shot",
+        help="run split-text + (enhance) + tts + (verify+regen) + merge + lrc in one shot",
     )
     _add_tts_args(p_pipe)
     p_pipe.add_argument("--gap", type=float, default=0.0)
     _add_lrc_extra_args(p_pipe)
+    p_pipe.add_argument(
+        "--normalize",
+        action="store_true",
+        help="rewrite code symbols/terms to TTS-readable form before TTS (both backends)",
+    )
+    p_pipe.add_argument("--normalize-model", default=DEFAULT_NORMALIZATION_MODEL)
+    p_pipe.add_argument("--normalize-concurrency", type=int, default=10)
     p_pipe.add_argument("--enhance", action="store_true", help="run sentence-tag enhancement before fish TTS")
     p_pipe.add_argument("--enhance-model", default=DEFAULT_ENHANCEMENT_MODEL)
     p_pipe.add_argument("--enhance-concurrency", type=int, default=10)
-    p_pipe.add_argument("--verify", action="store_true", help="run audio QA after merging")
+    p_pipe.add_argument(
+        "--verify",
+        action="store_true",
+        help="run audio QA before merging; regenerate failing clips so they don't get baked in",
+    )
     p_pipe.add_argument("--verify-model", default=DEFAULT_VERIFY_MODEL)
     p_pipe.add_argument("--verify-concurrency", type=int, default=5)
     p_pipe.add_argument("--verify-language", default="English")
+    p_pipe.add_argument(
+        "--verify-tries-per-ref",
+        type=int,
+        default=2,
+        help="regeneration attempts per voice reference before rotating to the next (fish); refs come from voice_labels.json",
+    )
+    p_pipe.add_argument(
+        "--verify-max-retries",
+        type=int,
+        default=0,
+        help="hard cap on total regeneration rounds (0 = no cap: refs x tries-per-ref)",
+    )
+    p_pipe.add_argument(
+        "--verify-repair",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="apply the corrected_spoken_text the audio-aware verifier proposes (respell a mispronounced token, drop a bad tag) before re-synthesizing",
+    )
     p_pipe.set_defaults(func=_cmd_article_pipeline)
 
 
@@ -136,6 +176,12 @@ def _add_tts_args(p: argparse.ArgumentParser) -> None:
         choices=["auto", "yes", "no"],
         help="fish: read sentences_enhanced.txt if present (auto=yes when file exists)",
     )
+
+
+def _add_normalize_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("slug")
+    p.add_argument("--model", default=DEFAULT_NORMALIZATION_MODEL, help="ZenMux model id")
+    p.add_argument("--concurrency", type=int, default=10)
 
 
 def _add_enhance_args(p: argparse.ArgumentParser) -> None:
@@ -225,11 +271,33 @@ def _cmd_article_split_text(args: argparse.Namespace) -> None:
     split_file(paths.source, paths.sentences)
 
 
-def _cmd_article_enhance(args: argparse.Namespace) -> None:
+def _cmd_article_normalize(args: argparse.Namespace) -> None:
     paths = article_paths(args.slug)
     if not paths.sentences.exists():
         raise SystemExit(f"missing sentences file: {paths.sentences} (run `article split-text` first)")
     sentences = read_sentences(paths.sentences)
+    cache = normalize_sentences(
+        sentences=sentences,
+        cache_path=paths.normalization_cache,
+        concurrency=args.concurrency,
+        model=args.model,
+    )
+    write_normalized_file(sentences, cache, paths.sentences_normalized)
+
+
+def _enhance_input_path(paths) -> Path:
+    """Tag-enhancement builds on the normalized text when it exists."""
+    return paths.sentences_normalized if paths.sentences_normalized.exists() else paths.sentences
+
+
+def _cmd_article_enhance(args: argparse.Namespace) -> None:
+    paths = article_paths(args.slug)
+    src = _enhance_input_path(paths)
+    if not src.exists():
+        raise SystemExit(f"missing sentences file: {src} (run `article split-text` first)")
+    if src == paths.sentences_normalized:
+        print(f"enhancing normalized sentences: {src.name}")
+    sentences = read_sentences(src)
     cache = enhance_sentences(
         sentences=sentences,
         cache_path=paths.enhancement_cache,
@@ -269,25 +337,28 @@ def _build_backend(args: argparse.Namespace, meta: ArticleMeta):
 
 
 def _pick_sentences_path(args: argparse.Namespace, paths) -> Path:
-    """Decide whether to feed the enhanced or the plain sentences file to TTS.
+    """Decide which sentences file TTS should read.
 
-    Only the fish backend understands the tags, so chatterbox always reads
-    the plain file. For fish, `--use-enhanced auto` (default) reads the
-    enhanced file when it's present and falls back to plain otherwise.
+    Layers, most-specific first:
+      - fish + tag-enhanced text (built on top of normalized) when present,
+        unless `--use-enhanced no`; only the fish backend understands tags.
+      - normalized text (code symbols/terms made TTS-readable) when present —
+        this helps BOTH backends, so chatterbox prefers it over the raw file.
+      - the raw `sentences.txt` otherwise.
     """
     backend = args.backend or "chatterbox"
     use = args.use_enhanced
-    if backend != "fish" or use == "no":
-        return paths.sentences
-    if use == "yes":
-        if not paths.sentences_enhanced.exists():
+    if backend == "fish" and use != "no":
+        if paths.sentences_enhanced.exists():
+            return paths.sentences_enhanced
+        if use == "yes":
             raise SystemExit(
                 f"--use-enhanced=yes but {paths.sentences_enhanced} is missing "
                 "(run `article enhance` first)"
             )
-        return paths.sentences_enhanced
-    # auto: prefer enhanced when present
-    return paths.sentences_enhanced if paths.sentences_enhanced.exists() else paths.sentences
+    if paths.sentences_normalized.exists():
+        return paths.sentences_normalized
+    return paths.sentences
 
 
 def _cmd_article_tts(args: argparse.Namespace) -> None:
@@ -364,6 +435,13 @@ def _cmd_article_lrc(args: argparse.Namespace) -> None:
     )
 
 
+def _spoken_sentences(paths, count: int) -> list[str] | None:
+    """The intended spoken form (normalized text) for QA, when it exists."""
+    if not paths.sentences_normalized.exists():
+        return None
+    return read_sentences(paths.sentences_normalized)[:count]
+
+
 def _cmd_article_verify(args: argparse.Namespace) -> None:
     paths = article_paths(args.slug)
     if not paths.sentences.exists():
@@ -381,7 +459,121 @@ def _cmd_article_verify(args: argparse.Namespace) -> None:
         concurrency=args.concurrency,
         target_language=args.language,
         limit=args.limit,
+        spoken_sentences=_spoken_sentences(paths, len(audio_files)),
     )
+
+
+def _ordered_reference_ids(current_id: str, labels_path: Path = Path("voice_labels.json")) -> list[str]:
+    """Fish voice reference ids to try, current one first then the backups.
+
+    Reads `voice_labels.json:reference_ids` (a dict of named entries each with
+    an `id`). The article's active reference leads so re-rolls stay on the
+    preferred voice before rotating to backups for stubborn clips.
+    """
+    ids: list[str] = [current_id] if current_id else []
+    try:
+        data = json.loads(labels_path.read_text(encoding="utf-8"))
+        for entry in (data.get("reference_ids") or {}).values():
+            if isinstance(entry, dict) and entry.get("id") and entry["id"] not in ids:
+                ids.append(entry["id"])
+    except (OSError, json.JSONDecodeError):
+        pass
+    return ids or [current_id]
+
+
+def _verify_and_regenerate(
+    *,
+    backend,
+    make_fish_backend,
+    ref_ids: list,
+    tries_per_ref: int,
+    tts_sentences_path: Path,
+    plain_sentences: list[str],
+    paths,
+    suffix: str,
+    limit: int,
+    model: str,
+    concurrency: int,
+    language: str,
+    max_retries: int,
+    apply_fix: bool,
+) -> None:
+    """Verify each clip before merge; regenerate failing ones, escalating.
+
+    Two repair strategies, both driven by the audio-aware verifier:
+    - text fix: when the verifier proposes a `corrected_spoken_text` (e.g.
+      respell a mispronounced token, drop a bad tag), apply it to the derived
+      TTS-input file — never the original `sentences.txt` — then re-synthesize.
+    - voice rotation (fish): give each reference id `tries_per_ref` attempts,
+      then rotate to the next backup voice for clips text can't fix (robotic /
+      distorted delivery). The fish backend is rebuilt per reference.
+
+    Rounds run until clips pass or every reference's tries are spent
+    (`len(ref_ids) * tries_per_ref`, optionally capped by `max_retries`);
+    survivors are reported and the pipeline merges anyway.
+    """
+    can_fix_text = apply_fix and tts_sentences_path != paths.sentences
+    total_rounds = len(ref_ids) * tries_per_ref
+    if max_retries:
+        total_rounds = min(total_rounds, max_retries)
+
+    cur_backend = backend
+    cur_ref_idx = 0
+    for attempt in range(total_rounds + 1):
+        files = _audio_files(paths)
+        n = len(files)
+        report = verify_article(
+            sentences=plain_sentences[:n],
+            audio_files=files,
+            report_path=paths.verify_report,
+            model=model,
+            concurrency=concurrency,
+            target_language=language,
+            limit=0,
+            spoken_sentences=_spoken_sentences(paths, n),
+        )
+        failed = report.get("failed_indexes", [])
+        if not failed:
+            print("verify: all clips passed")
+            return
+        if attempt >= total_rounds:
+            print(
+                f"verify: {len(failed)} clip(s) still failing after {total_rounds} "
+                f"regeneration round(s); merging anyway. Failed indexes: {failed}"
+            )
+            return
+
+        # Apply the audio-aware verifier's text fixes (respellings, tag drops).
+        if can_fix_text:
+            tts_list = read_sentences(tts_sentences_path)
+            results = report.get("results", {})
+            changed = 0
+            for idx in failed:
+                fix = (results.get(str(idx)) or {}).get("corrected_spoken_text")
+                if isinstance(fix, str) and fix.strip() and idx - 1 < len(tts_list) and fix.strip() != tts_list[idx - 1]:
+                    tts_list[idx - 1] = fix.strip()
+                    changed += 1
+            if changed:
+                tts_sentences_path.write_text("\n\n".join(tts_list) + "\n", encoding="utf-8")
+                print(f"verify round {attempt + 1}: applied {changed} verifier text fix(es)")
+
+        # Pick the reference for this round and rebuild the fish backend if it changed.
+        ref_idx = attempt // tries_per_ref
+        if make_fish_backend is not None and ref_ids[ref_idx] is not None and ref_idx != cur_ref_idx:
+            cur_backend = make_fish_backend(ref_ids[ref_idx])
+            cur_ref_idx = ref_idx
+            print(f"verify round {attempt + 1}: rotating to voice reference {ref_ids[ref_idx]}")
+
+        print(f"verify round {attempt + 1}/{total_rounds}: regenerating {len(failed)} clip(s): {failed}")
+        for idx in failed:
+            wav = paths.audio_dir / f"{idx:04d}{suffix}"
+            if wav.exists():
+                wav.unlink()
+        # Drop their verdicts so the next verify pass re-checks the new audio.
+        invalidate_indexes(paths.verify_report, failed)
+        # run_tts only synthesizes missing files, so this regenerates exactly
+        # the clips we just deleted, reading any applied text fixes.
+        run_tts(cur_backend, read_sentences(tts_sentences_path), paths.audio_dir, limit=limit, suffix=suffix)
 
 
 def _cmd_article_pipeline(args: argparse.Namespace) -> None:
@@ -394,22 +586,36 @@ def _cmd_article_pipeline(args: argparse.Namespace) -> None:
     backend = _build_backend(args, meta)
     args.backend = backend.name
 
+    # Normalize first (both backends): code symbols/terms -> TTS-readable form.
+    if args.normalize:
+        base_sentences = read_sentences(paths.sentences)
+        norm_cache = normalize_sentences(
+            sentences=base_sentences,
+            cache_path=paths.normalization_cache,
+            concurrency=args.normalize_concurrency,
+            model=args.normalize_model,
+        )
+        write_normalized_file(base_sentences, norm_cache, paths.sentences_normalized)
+
+    # Then tag-enhance (fish only), on top of the normalized text when present.
     if args.enhance:
         if backend.name != "fish":
             print(f"note: --enhance has no effect on backend={backend.name}; skipping")
         else:
-            base_sentences = read_sentences(paths.sentences)
+            enh_input = read_sentences(_enhance_input_path(paths))
             cache = enhance_sentences(
-                sentences=base_sentences,
+                sentences=enh_input,
                 cache_path=paths.enhancement_cache,
                 concurrency=args.enhance_concurrency,
                 model=args.enhance_model,
             )
-            write_enhanced_file(base_sentences, cache, paths.sentences_enhanced)
+            write_enhanced_file(enh_input, cache, paths.sentences_enhanced)
 
     sentences_path = _pick_sentences_path(args, paths)
     if sentences_path == paths.sentences_enhanced:
         print(f"using enhanced sentences: {sentences_path.name}")
+    elif sentences_path == paths.sentences_normalized:
+        print(f"using normalized sentences: {sentences_path.name}")
     sentences = read_sentences(sentences_path)
     # Original (untagged) sentences for LRC and verification.
     plain_sentences = read_sentences(paths.sentences)
@@ -419,11 +625,51 @@ def _cmd_article_pipeline(args: argparse.Namespace) -> None:
         suffix = f".{args.fish_format}"
     run_tts(backend, sentences, paths.audio_dir, limit=args.limit, suffix=suffix)
 
-    files = _audio_files(paths)
-    if not files:
+    if not _audio_files(paths):
         return
+
+    # Verify before merging so failing clips are regenerated rather than baked
+    # into merged.wav.
+    if args.verify:
+        if backend.name == "fish":
+            current_ref = args.fish_reference_id or meta.fish_reference_id
+            ref_ids = _ordered_reference_ids(current_ref)
+
+            def make_fish_backend(reference_id: str):
+                from blog_voice.tts.fish_audio import FishAudioBackend
+
+                return FishAudioBackend(
+                    reference_id=reference_id,
+                    ref_language=args.fish_ref_language,
+                    model=args.fish_model,
+                    audio_format=args.fish_format,
+                    sample_rate=args.fish_sample_rate,
+                )
+        else:
+            ref_ids = [None]
+            make_fish_backend = None
+
+        _verify_and_regenerate(
+            backend=backend,
+            make_fish_backend=make_fish_backend,
+            ref_ids=ref_ids,
+            tries_per_ref=args.verify_tries_per_ref,
+            tts_sentences_path=sentences_path,
+            plain_sentences=plain_sentences,
+            paths=paths,
+            suffix=suffix,
+            limit=args.limit,
+            model=args.verify_model,
+            concurrency=args.verify_concurrency,
+            language=args.verify_language,
+            max_retries=args.verify_max_retries,
+            apply_fix=args.verify_repair,
+        )
+
+    files = _audio_files(paths)
     timestamps = merge_wavs(files, paths.merged, gap_seconds=args.gap)
 
+    # Translations come last, after the audio is finalized.
     translations = None
     if args.translate_zh:
         translations = translate_sentences(
@@ -444,17 +690,6 @@ def _cmd_article_pipeline(args: argparse.Namespace) -> None:
         include_metadata=args.include_metadata,
         translations=translations,
     )
-
-    if args.verify:
-        verify_article(
-            sentences=plain_sentences[: len(files)],
-            audio_files=files,
-            report_path=paths.verify_report,
-            model=args.verify_model,
-            concurrency=args.verify_concurrency,
-            target_language=args.verify_language,
-            limit=0,
-        )
 
 
 def main() -> None:

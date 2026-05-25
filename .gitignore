@@ -25,6 +25,8 @@ opencode.json
 /voices_split/
 /articles/*/source.txt
 /articles/*/sentences.txt
+/articles/*/sentences_normalized.txt
+/articles/*/normalizations.json
 /articles/*/sentences_enhanced.txt
 /articles/*/enhancements.json
 /articles/*/audio/

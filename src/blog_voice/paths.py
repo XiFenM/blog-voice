@@ -29,6 +29,14 @@ class ArticlePaths:
         return self.root / "sentences.txt"
 
     @property
+    def sentences_normalized(self) -> Path:
+        return self.root / "sentences_normalized.txt"
+
+    @property
+    def normalization_cache(self) -> Path:
+        return self.root / "normalizations.json"
+
+    @property
     def sentences_enhanced(self) -> Path:
         return self.root / "sentences_enhanced.txt"
 

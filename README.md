@@ -22,14 +22,16 @@ voice library
 article pipeline (per slug)
   blog URL ──► (playwright eval) ──► articles/<slug>/source.txt
        └─► article split-text   ──► sentences.txt
-       └─► article enhance      ──► sentences_enhanced.txt   (可选; LLM 注入 Fish 标签, 仅 fish 后端)
+       └─► article normalize    ──► sentences_normalized.txt  (可选; LLM 把代码符号/术语改成可读形式, 两种后端都受益)
+       └─► article enhance      ──► sentences_enhanced.txt   (可选; LLM 注入 Fish 标签, 仅 fish 后端, 叠在 normalized 之上)
        └─► article tts          ──► audio/####.wav           (chatterbox 本地 / fish API)
+       └─► article verify       ──► verify_report.json       (可选; 多模态 LLM 校验音频, 合并前跑)
+       └─► (校验不过: 按校验给的修正改文本重生成, 或轮换参考音色, 每个音色 N 次)
        └─► article merge        ──► merged.wav
        └─► article lrc          ──► subtitle.lrc             (可 --translate-zh 加中文翻译)
-       └─► article verify       ──► verify_report.json       (可选; 多模态 LLM 校验音频)
 ```
 
-每篇文章一个目录，自带 `meta.json` 存默认 ref 音色和后端选择，所以同时跑多篇互不打架。所有 LLM 调用统一走 [ZenMux 网关](https://zenmux.ai)（OpenAI 协议），纯文本调用（翻译 / 标签增强）失败时自动回退到 DeepSeek 官方 API。
+每篇文章一个目录，自带 `meta.json` 存默认 ref 音色和后端选择，所以同时跑多篇互不打架。所有 LLM 调用统一走 [ZenMux 网关](https://zenmux.ai)（OpenAI 协议），纯文本调用（术语规范化 / 标签增强 / 翻译）失败时自动回退到 DeepSeek 官方 API。
 
 ## 5 分钟 quickstart
 
@@ -122,7 +124,7 @@ uv sync   # 装全部依赖 + 注册 `blog-voice` CLI 入口
 | key | 何时必需 | 说明 |
 |---|---|---|
 | `ZENMUX_API_KEY` | 用 `enhance` / `lrc --translate-zh` / `verify` 任一时 | LLM 网关 [zenmux.ai](https://zenmux.ai)，一把 key 同时覆盖三处（翻译 / 标签增强 / 音频校验），model id 走 `provider/model-name` 格式 |
-| `DEEPSEEK_API_KEY` | 可选 | ZenMux 配额耗尽/网络异常时**自动回退**到 [DeepSeek 官方 API](https://platform.deepseek.com/api_keys)，仅对 `deepseek/*` 模型有效。音频校验（Gemini）没有兜底 |
+| `DEEPSEEK_API_KEY` | 可选 | ZenMux 配额耗尽/网络异常时，三个纯文本步骤（规范化 / 增强 / 翻译）**自动回退**到 [DeepSeek 官方 API](https://platform.deepseek.com/api_keys)。回退目标模型与 ZenMux 配的模型无关（规范化/增强→`deepseek-v4-pro`，翻译→`deepseek-v4-flash`），所以即使把某步换成非 deepseek 的 ZenMux 模型也能兜底。音频校验（Gemini）没有兜底 |
 | `FISH_API_KEY` | TTS 后端选 `fish` 时 | [fish.audio](https://fish.audio/app/api-keys/) |
 | `HF_ENDPOINT` | chatterbox 首次下载模型时（可选） | 设为 `https://hf-mirror.com` 走镜像 |
 
@@ -142,12 +144,13 @@ uv sync   # 装全部依赖 + 注册 `blog-voice` CLI 入口
 | `voice split` | 用手工标的 [voice_labels.json](voice_labels.json) 拆分混合片段到 `voices_split/<角色>/{normal,mecha}/` |
 | `article add <slug> --source FILE` | 创建 `articles/<slug>/`，写入 `source.txt` + `meta.json` |
 | `article split-text <slug>` | 切句到 `sentences.txt` |
-| `article enhance <slug>` | 走 ZenMux 给每句注入 Fish 标签（`[break]/[emphasis]/[curious]`…），写 `sentences_enhanced.txt`。**仅 fish 后端有意义** |
+| `article normalize <slug>` | 走 ZenMux 把代码符号/术语改写成可朗读形式（`torch.mm`→"torch dot M M"、下划线、下标、`.so`…），写 `sentences_normalized.txt`。**两种后端都受益**，排在 enhance 之前 |
+| `article enhance <slug>` | 走 ZenMux 给每句注入 Fish 标签（`[break]/[emphasis]/[curious]`…），写 `sentences_enhanced.txt`。**仅 fish 后端有意义**，叠在 normalized 之上 |
 | `article tts <slug>` | 每句生成一个 wav 到 `audio/####.wav`，支持断点续跑。fish 后端会自动用 enhanced 版本（如果存在） |
 | `article merge <slug>` | 拼成单个 `merged.wav` |
 | `article lrc <slug>` | 生成 `subtitle.lrc`，`--translate-zh` 给每句加一行中文翻译（走 ZenMux） |
 | `article verify <slug>` | 把每条音频 + 原句送给支持音频输入的多模态模型（默认 `google/gemini-3.5-flash`），输出 `verify_report.json` |
-| `article pipeline <slug>` | 串起 split-text + (enhance) + tts + merge + lrc + (verify) 一把梭，用 `--enhance` / `--verify` 开关启用可选步骤 |
+| `article pipeline <slug>` | 串起 split-text + (normalize) + (enhance) + tts + (verify+重生成) + merge + lrc 一把梭，用 `--normalize` / `--enhance` / `--verify` 开关启用可选步骤 |
 
 每个子命令 `--help` 看完整参数。
 
@@ -281,9 +284,30 @@ uv run blog-voice article tts pytorch-internals \
 | chatterbox / 6–8 GB VRAM GPU | ~0.3–0.5× 实时 | 5–15 分钟 |
 | fish-audio API | ~0.5–1× 实时 | 视并发，几分钟到十几分钟 |
 
+## 6.4. 术语 / 代码符号规范化 — `article normalize`
+
+技术博客里 `torch.mm`、`AT_DISPATCH_ALL_TYPES`、`tensor[1, :]`、`.so`、`::`、`PyTorch` 这类 token，TTS 经常读错或整段吞掉（实测是音频校验里大多数 fail 的来源）。这一步走 ZenMux 调 LLM，**只**把这些符号/术语改写成"念出来对"的口语形式，普通英文原样不动，不加任何标签、不翻译。**两种后端都受益**（chatterbox 一样会把 `torch.mm` 读成 "torch mum"），所以排在 enhance 之前。
+
+```bash
+uv run blog-voice article normalize pytorch-internals \
+  --model deepseek/deepseek-v4-pro --concurrency 10
+```
+
+写到 `articles/<slug>/sentences_normalized.txt`：
+
+```
+原句:    At the very most abstract level, when you call torch.mm, two dispatches happen:
+规范化:  At the very most abstract level, when you call torch dot M M, two dispatches happen:
+
+原句:    To do dtype dispatch, you should use the AT_DISPATCH_ALL_TYPES macro.
+规范化:  To do D type dispatch, you should use the A T DISPATCH ALL TYPES macro.
+```
+
+可断点续跑：缓存在 `normalizations.json`（按原句做 key），重跑只补缺。后续 `article tts` 会自动优先用这份文本（两种后端都用），`article enhance` 会在它之上叠标签，LRC 字幕和 `article verify` 仍用原始 `sentences.txt`（符号改写是 TTS 内部产物，不该出现在字幕里、也不该发给校验模型）。
+
 ## 6.5. （fish 专用）句子标签增强 — `article enhance`
 
-只对 fish 后端有意义。chatterbox 不认 `[break]` `[emphasis]` 这类标签会按字面读出来。
+只对 fish 后端有意义。chatterbox 不认 `[break]` `[emphasis]` 这类标签会按字面读出来。`sentences_normalized.txt` 存在时，enhance 会在规范化后的文本上加标签（而不是原句）。
 
 ```bash
 uv run blog-voice article enhance pytorch-internals \
@@ -338,27 +362,33 @@ uv run blog-voice article verify pytorch-internals \
 }
 ```
 
-末尾汇总 `passed / total` 和 `failed_indexes`，可断点续跑：已校验的句子在 `verify_report.json` 里、重跑只补新生成的。
+末尾汇总 `passed / total` 和 `failed_indexes`，可断点续跑：已校验的句子在 `verify_report.json` 里、重跑只补新生成的。独立 `article verify` 命令只写报告、不重生成音频；合并前的自动重生成只在 `article pipeline` 里做（见下）。
 
 ## 9. 全流程一把梭 — `article pipeline`
 
-`split-text` → (`enhance`) → `tts` → `merge` → `lrc` → (`verify`)，方括号项用 flag 开启：
+`split-text` → (`normalize`) → (`enhance`) → `tts` → (`verify` + 重生成) → `merge` → `lrc`，方括号项用 flag 开启：
 
 ```bash
-# chatterbox + 中文字幕
+# chatterbox + 术语规范化 + 中文字幕
 uv run blog-voice article pipeline pytorch-internals \
   --backend chatterbox --device cuda \
   --ref voices_split/爱弥斯/refs/lively_20s.wav \
-  --gap 0.3 --translate-zh --include-metadata
+  --normalize --gap 0.3 --translate-zh --include-metadata
 
-# fish + 标签增强 + 字幕翻译 + 音频校验
+# fish + 术语规范化 + 标签增强 + 音频校验（合并前）+ 字幕翻译
 uv run blog-voice article pipeline pytorch-internals \
   --backend fish \
+  --normalize --normalize-model deepseek/deepseek-v4-pro \
   --enhance --enhance-model deepseek/deepseek-v4-pro \
+  --verify --verify-model google/gemini-3.5-flash --verify-tries-per-ref 2 \
   --translate-zh --translation-model deepseek/deepseek-v4-flash \
-  --verify --verify-model google/gemini-3.5-flash \
   --include-metadata
 ```
+
+顺序上的两个关键点：
+
+- **术语规范化在最前**：`--normalize` 先把代码符号/术语改成可读形式，`--enhance` 再在它之上加 Fish 标签，TTS 读的是"规范化(+标签)"后的文本；字幕和校验始终用原句。
+- **校验在合并之前跑**：`--verify` 开启后逐句校验。校验模型（多模态）同时拿到原句和"规范化后的朗读形式"，所以 `tensor[1, 0]`→"tensor at index one comma zero" 这种正当改写不会被判成读错；它通过 tool call 提交判定，并且因为"真的听到了"哪里读错，可以直接给出 `corrected_spoken_text` 修正（比如把 `Impl` 重拼成 `Imp-ell`，免得读成 "impulse"，或去掉引起气声的标签）。每个没通过的句子按两条策略升级修复：①有文本修正就改派生文件（`sentences_enhanced.txt` / `sentences_normalized.txt`，绝不动原始 `sentences.txt`）重生成；②音色本身不行（机械音/失真，文本救不了）就换参考音色——`voice_labels.json` 里每个 reference 给 `--verify-tries-per-ref` 次机会（默认 2），用完轮到下一个备用音色。总轮数 = 参考数 × 每参考次数（可用 `--verify-max-retries` 封顶），用完仍不过就照常合并并打印剩余 index。翻译放在最后，等音频定稿后再做。
 
 ## 目录结构
 
@@ -372,7 +402,7 @@ blog-voice/
 │   ├── paths.py            # ArticlePaths + ArticleMeta
 │   ├── llm/zenmux.py       # ZenMux OpenAI-compatible 客户端
 │   ├── voices/             # scrape / classify / split
-│   ├── text/               # sentences (切句) + enhance (Fish 标签注入)
+│   ├── text/               # sentences (切句) + normalize (符号/术语规范化) + enhance (Fish 标签注入)
 │   ├── tts/                # base / chatterbox / fish_audio / runner
 │   ├── audio/merge.py      # 合并 wav
 │   ├── subtitle/lrc.py     # 生成 LRC（走 ZenMux 翻译）
@@ -383,7 +413,9 @@ blog-voice/
 │   ├── meta.json                  # 默认 ref / backend / artist 等
 │   ├── source.txt
 │   ├── sentences.txt              # 原始切句（LRC、verify 都用这版）
-│   ├── sentences_enhanced.txt     # fish 标签增强版（fish TTS 自动读）
+│   ├── sentences_normalized.txt   # 符号/术语规范化版（两种后端 TTS 优先读）
+│   ├── normalizations.json        # 规范化缓存（断点续跑）
+│   ├── sentences_enhanced.txt     # fish 标签增强版（叠在 normalized 之上，fish TTS 自动读）
 │   ├── enhancements.json          # 增强缓存（断点续跑）
 │   ├── audio/####.wav
 │   ├── merged.wav
@@ -397,6 +429,6 @@ blog-voice/
 
 - **TTS 输出格式不一致**：chatterbox 默认写 IEEE_FLOAT 32-bit，fish 默认 PCM；`article merge` 走 `soundfile` 统一读，输出 16-bit PCM。
 - **fish 后端的 ref 转录**：第一次用本地 wav 做参考会调用 fish ASR 转录中文台词、缓存在 `<ref>.transcript.txt`。ASR 不理想时可手工编辑这个文件。
-- **ZenMux 免费配额很紧**：跑全文翻译 / 增强（250 句 × 2 ≈ 500 次调用）可能就把 rolling window 耗光，会返回 HTTP 402 `quote_exceeded`。配 `DEEPSEEK_API_KEY` 后纯文本部分自动兜底；音频校验（Gemini）没有兜底，撞了只能等配额刷新或升级 ZenMux 套餐。
-- **缩写/符号/版本号**：技术博客 TTS 最大的坑。已通过 `article enhance` 给 fish 加 `[break]/[emphasis]` 缓解部分节奏问题，但术语展开（`API → A P I`、`v2.5.1 → version two point five point one`）仍未做。如听感不行，参考 voice.md §3 做 LLM 预处理后再喂给 TTS。
+- **ZenMux 免费配额很紧**：跑全文规范化 / 增强 / 翻译（250 句 × 3 ≈ 750 次调用）可能就把 rolling window 耗光，会返回 HTTP 402 `quote_exceeded`。三者默认都用 `deepseek/*` 模型，配 `DEEPSEEK_API_KEY` 后自动兜底；音频校验（Gemini）没有兜底，撞了只能等配额刷新或升级 ZenMux 套餐。
+- **缩写/符号/版本号**：技术博客 TTS 最大的坑。现已由 `article normalize` 处理：把 `torch.mm`、下划线宏、下标 `[1, :]`、`.so`、`PyTorch`/`dtype` 这类 token 改写成可读形式（两种后端都用）。默认走"只修明确读错"的保守策略；想更激进地展开缩写 / 版本号（`API → A P I`、`v2.5.1 → version two point five point one`）可以加到 `text/normalize.py` 的 prompt 里。背景见 voice.md §3。
 - **copyright**：`voices/`、`voices_split/`、`articles/*/source.txt` / `sentences*.txt` / `audio/` / `merged.wav` / `subtitle.lrc` 等用户内容已 gitignore（看 `.gitignore`），不要推到公开仓库；只有 `meta.json` + `voice_labels.json` 这些"配置/标注"文件会被跟踪。

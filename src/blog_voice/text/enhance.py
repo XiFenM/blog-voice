@@ -18,7 +18,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from blog_voice.llm.zenmux import chat_completion
+from blog_voice.llm.zenmux import DEEPSEEK_FALLBACK_PRO, chat_completion
 
 
 # Curated subset of Fish Audio tags that suit calm-to-lively English tech
@@ -90,6 +90,7 @@ def _user_prompt(sentence: str) -> str:
 def _enhance_one(model: str, sentence: str) -> str:
     response = chat_completion(
         model=model,
+        fallback_model=DEEPSEEK_FALLBACK_PRO,
         temperature=0.4,
         messages=[
             {"role": "system", "content": _system_prompt("a lively young female voice")},
