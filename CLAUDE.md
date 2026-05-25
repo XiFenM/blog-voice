@@ -12,7 +12,7 @@ What this means for working in this repo:
 
 - When the user asks for a new article, **prefer AI Infra topics** matching the plan (vLLM blog, KV cache, GPU scheduling, inference serving, etc.) over arbitrary tech writing.
 - When suggesting cadence or batch size for new articles, anchor on the plan: **one new article per 2–3 weeks**, not "let's add ten at once."
-- `English-learn/baseline/` (Week 0 + Week 22 test recordings) and `English-learn/weekly/` (weekly logs) are **personal data** — same gitignore treatment as `voices/` and `articles/*/audio/`. The plan markdown itself and reference advice files are fine to commit (general study material, no copyright issue).
+- Under `English-learn/`, only **audio recordings** are gitignored (`**/*.{m4a,wav,mp3}` — voice data + git binary-bloat, same spirit as `voices/` and `articles/*/audio/`). All **text** is tracked: the plan, reference advice, weekly logs, feedback, and Anki cards — so the user can version their learning progress. (This assumes the repo stays private; the text logs document their English practice.)
 - Voice-related decisions (which ref clip, which 美剧 to use, etc.) have already been made and recorded in the plan — defer to the plan rather than re-recommending from scratch.
 
 ## Pipeline overview
