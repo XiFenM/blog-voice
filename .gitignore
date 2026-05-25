@@ -31,6 +31,7 @@ opencode.json
 /articles/*/enhancements.json
 /articles/*/audio/
 /articles/*/merged.wav
+/articles/*/merged.m4a
 /articles/*/subtitle.lrc
 /articles/*/translations_zh.json
 /articles/*/verify_report.json

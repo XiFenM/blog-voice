@@ -90,6 +90,13 @@ npm install -g @playwright/cli@latest
 playwright-cli install --skills
 ```
 
+**2.5. ffmpeg**（仅在 `merge --m4a` / `pipeline --m4a` 导出 m4a 时用到，可选）
+
+```bash
+# macOS: brew install ffmpeg ; Debian/Ubuntu: sudo apt-get install -y ffmpeg
+# 或者装一个自带静态二进制的 pip 包: uv pip install imageio-ffmpeg
+```
+
 **3. 本机 Chrome 调试端口 + SSH 端口转发**（仅当 playwright-cli 跑在远程开发机时）
 
 本机退出 Chrome 后用调试端口启动：
@@ -147,7 +154,7 @@ uv sync   # 装全部依赖 + 注册 `blog-voice` CLI 入口
 | `article normalize <slug>` | 走 ZenMux 把代码符号/术语改写成可朗读形式（`torch.mm`→"torch dot M M"、下划线、下标、`.so`…），写 `sentences_normalized.txt`。**两种后端都受益**，排在 enhance 之前 |
 | `article enhance <slug>` | 走 ZenMux 给每句注入 Fish 标签（`[break]/[emphasis]/[curious]`…），写 `sentences_enhanced.txt`。**仅 fish 后端有意义**，叠在 normalized 之上 |
 | `article tts <slug>` | 每句生成一个 wav 到 `audio/####.wav`，支持断点续跑。fish 后端会自动用 enhanced 版本（如果存在） |
-| `article merge <slug>` | 拼成单个 `merged.wav` |
+| `article merge <slug>` | 拼成单个 `merged.wav`，`--m4a` 再导出带标签的 `merged.m4a`（AAC，需 ffmpeg） |
 | `article lrc <slug>` | 生成 `subtitle.lrc`，`--translate-zh` 给每句加一行中文翻译（走 ZenMux） |
 | `article verify <slug>` | 把每条音频 + 原句送给支持音频输入的多模态模型（默认 `google/gemini-3.5-flash`），输出 `verify_report.json` |
 | `article pipeline <slug>` | 串起 split-text + (normalize) + (enhance) + tts + (verify+重生成) + merge + lrc 一把梭，用 `--normalize` / `--enhance` / `--verify` 开关启用可选步骤 |
@@ -328,9 +335,11 @@ uv run blog-voice article enhance pytorch-internals \
 ```bash
 uv run blog-voice article merge pytorch-internals          # 直接拼
 uv run blog-voice article merge pytorch-internals --gap 0.3 # 句间加 0.3s 静音
+uv run blog-voice article merge pytorch-internals --gap 0.3 --m4a            # 顺带导出 m4a
+uv run blog-voice article merge pytorch-internals --gap 0.3 --m4a --m4a-bitrate 96k
 ```
 
-输出 `articles/<slug>/merged.wav`（16-bit PCM）。
+输出 `articles/<slug>/merged.wav`（16-bit PCM）。加 `--m4a` 再额外导出 `merged.m4a`（AAC，体积约为 wav 的 1/5，带 title/artist/album 标签，适合 Apple Music / netease 等支持 LRC 的播放器；比特率用 `--m4a-bitrate` 调，默认 128k）。**需要本机有 `ffmpeg`**；没有就只跳过 m4a、wav 不受影响。`article pipeline` 也支持 `--m4a`。
 
 ## 8. 生成字幕 — `article lrc`
 
@@ -382,7 +391,7 @@ uv run blog-voice article pipeline pytorch-internals \
   --enhance --enhance-model deepseek/deepseek-v4-pro \
   --verify --verify-model google/gemini-3.5-flash --verify-tries-per-ref 2 \
   --translate-zh --translation-model deepseek/deepseek-v4-flash \
-  --include-metadata
+  --m4a --include-metadata
 ```
 
 顺序上的两个关键点：
@@ -419,6 +428,7 @@ blog-voice/
 │   ├── enhancements.json          # 增强缓存（断点续跑）
 │   ├── audio/####.wav
 │   ├── merged.wav
+│   ├── merged.m4a                # --m4a 导出（AAC, 可选）
 │   ├── subtitle.lrc
 │   ├── translations_zh.json       # 翻译缓存
 │   └── verify_report.json         # 音频 QA 报告

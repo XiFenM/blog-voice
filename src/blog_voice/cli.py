@@ -23,6 +23,7 @@ import json
 import shutil
 from pathlib import Path
 
+from blog_voice.audio.convert import to_m4a
 from blog_voice.audio.merge import merge_wavs
 from blog_voice.llm.zenmux import (
     DEFAULT_ENHANCEMENT_MODEL,
@@ -99,6 +100,7 @@ def _add_article_subcommands(sub: argparse._SubParsersAction) -> None:
     p_merge = sub.add_parser("merge", help="concatenate per-sentence wavs into merged.wav")
     p_merge.add_argument("slug")
     p_merge.add_argument("--gap", type=float, default=0.0, help="silence seconds between sentences")
+    _add_m4a_args(p_merge)
     p_merge.set_defaults(func=_cmd_article_merge)
 
     p_lrc = sub.add_parser("lrc", help="emit subtitle.lrc (optionally bilingual)")
@@ -118,6 +120,7 @@ def _add_article_subcommands(sub: argparse._SubParsersAction) -> None:
     )
     _add_tts_args(p_pipe)
     p_pipe.add_argument("--gap", type=float, default=0.0)
+    _add_m4a_args(p_pipe)
     _add_lrc_extra_args(p_pipe)
     p_pipe.add_argument(
         "--normalize",
@@ -188,6 +191,29 @@ def _add_enhance_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("slug")
     p.add_argument("--model", default=DEFAULT_ENHANCEMENT_MODEL, help="ZenMux model id")
     p.add_argument("--concurrency", type=int, default=10)
+
+
+def _add_m4a_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--m4a",
+        action="store_true",
+        help="also export merged.m4a (AAC) next to merged.wav; needs ffmpeg",
+    )
+    p.add_argument("--m4a-bitrate", default="128k", help="AAC bitrate for --m4a (e.g. 96k, 128k, 192k)")
+
+
+def _export_m4a(args: argparse.Namespace, paths, meta: ArticleMeta) -> None:
+    """Encode merged.wav -> merged.m4a with tags, if --m4a was passed."""
+    if not getattr(args, "m4a", False):
+        return
+    to_m4a(
+        paths.merged,
+        paths.merged_m4a,
+        title=meta.title or args.slug,
+        artist=meta.artist,
+        album=meta.album,
+        bitrate=args.m4a_bitrate,
+    )
 
 
 def _add_lrc_args(p: argparse.ArgumentParser) -> None:
@@ -392,7 +418,9 @@ def _cmd_article_merge(args: argparse.Namespace) -> list[float]:
     files = _audio_files(paths)
     if not files:
         raise SystemExit(f"no .wav files under {paths.audio_dir} (run `article tts` first)")
-    return merge_wavs(files, paths.merged, gap_seconds=args.gap)
+    timestamps = merge_wavs(files, paths.merged, gap_seconds=args.gap)
+    _export_m4a(args, paths, ArticleMeta.load(paths.meta))
+    return timestamps
 
 
 def _cmd_article_lrc(args: argparse.Namespace) -> None:
@@ -668,6 +696,7 @@ def _cmd_article_pipeline(args: argparse.Namespace) -> None:
 
     files = _audio_files(paths)
     timestamps = merge_wavs(files, paths.merged, gap_seconds=args.gap)
+    _export_m4a(args, paths, meta)
 
     # Translations come last, after the audio is finalized.
     translations = None

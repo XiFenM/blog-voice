@@ -53,6 +53,10 @@ class ArticlePaths:
         return self.root / "merged.wav"
 
     @property
+    def merged_m4a(self) -> Path:
+        return self.root / "merged.m4a"
+
+    @property
     def lrc(self) -> Path:
         return self.root / "subtitle.lrc"
 

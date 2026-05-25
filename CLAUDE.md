@@ -73,10 +73,10 @@ uv run blog-voice article enhance <slug> [--model deepseek/deepseek-v4-pro]    #
 uv run blog-voice article tts <slug> [--limit 5] [--device cuda|cpu] \
     [--backend chatterbox|fish] [--ref <wav>] [--fish-reference-id <id>] \
     [--use-enhanced auto|yes|no]
-uv run blog-voice article merge <slug> [--gap 0.3]
+uv run blog-voice article merge <slug> [--gap 0.3] [--m4a] [--m4a-bitrate 128k]
 uv run blog-voice article lrc <slug> [--translate-zh] [--translation-model deepseek/deepseek-v4-flash]
 uv run blog-voice article verify <slug> [--model google/gemini-3.5-flash] [--language English]
-uv run blog-voice article pipeline <slug> [...all of the above args + --normalize --enhance --verify]
+uv run blog-voice article pipeline <slug> [...all of the above args + --normalize --enhance --verify --m4a]
 ```
 
 No tests, no linter, no build step beyond `uv sync`.
@@ -104,6 +104,8 @@ Per-character Fish Audio voice model IDs (uploaded via fish.audio's voice clonin
 **`tts/runner.py`** — resumability via `dest.exists() and dest.stat().st_size > 0` — interrupted partial writes can corrupt; the chatterbox path is atomic through torchaudio's tmp, the fish path writes bytes directly so a half-written file can be deleted manually.
 
 **`audio/merge.py`** — concatenates wavs using `soundfile` (not stdlib `wave`) because chatterbox produces float32 and stdlib `wave` only handles PCM. Output is forced to 16-bit PCM. Returns per-sentence end-timestamps so the LRC generator uses the same timing as the merged audio (which may include `--gap` silence between sentences).
+
+**`audio/convert.py`** — `to_m4a(wav, out, title/artist/album, bitrate)` shells out to **ffmpeg** to write a tagged AAC `.m4a` next to `merged.wav` (for LRC-syncing music players; ~5× smaller than the wav). ffmpeg is a **soft dependency**: located on PATH or via an installed `imageio-ffmpeg` static binary, and if absent it just warns and leaves the wav — the pipeline never fails over it. Opt in with `--m4a` on `article merge` or `article pipeline` (`cli._export_m4a` runs it right after merge using the meta tags); `merged.m4a` is gitignored like `merged.wav`.
 
 **`llm/zenmux.py`** — single OpenAI-compatible client factory pointing at `https://zenmux.ai/api/v1`, reads `ZENMUX_API_KEY` from env. Shared by translation, enhancement, and verification so one provider key fronts all three (model id format is `provider/model-name`). Default model constants live here: `DEFAULT_TRANSLATION_MODEL=deepseek/deepseek-v4-flash`, `DEFAULT_ENHANCEMENT_MODEL=deepseek/deepseek-v4-pro`, `DEFAULT_VERIFY_MODEL=google/gemini-3.5-flash`. They're imported by `cli.py` for argparse defaults so a single edit in zenmux.py propagates to every command.
 
