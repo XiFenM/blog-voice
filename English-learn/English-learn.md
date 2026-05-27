@@ -510,5 +510,5 @@ Example (from Latent Space S2E14, 04:32):
 
 ## 附录 B：参考资料原始来源
 
-- 本计划综合了 `reference-advice1.md`（12 周双轨阅读法 + 听力 20 min 流程）、`reference-advice2.md`（70/30 技术英语主线 + 词块库）、`reference-advice3.md`（Narrator / JAM / Shadowing 三技巧）的核心方法。
-- AI Infra 播客来源：`AI-infra-podcast.md` §1 节目清单与 §4 10 集入门路线，已映射到本计划阶段 3–5 的听力升级路径。
+- 本计划综合了 `references/reference-advice1.md`（12 周双轨阅读法 + 听力 20 min 流程）、`references/reference-advice2.md`（70/30 技术英语主线 + 词块库）、`references/reference-advice3.md`（Narrator / JAM / Shadowing 三技巧）的核心方法。
+- AI Infra 播客来源：`references/AI-infra-podcast.md` §1 节目清单与 §4 10 集入门路线，已映射到本计划阶段 3–5 的听力升级路径。

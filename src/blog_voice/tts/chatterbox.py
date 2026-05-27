@@ -2,7 +2,7 @@
 
 Downloads model weights once into `.model-cache/chatterbox/` and reuses them.
 Always passes the same reference clip to every sentence to prevent voice
-drift on the autoregressive model (see voice.md §2).
+drift on the autoregressive model.
 """
 
 import os

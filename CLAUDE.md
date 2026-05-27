@@ -6,12 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The user is a software engineer (AI Infra direction) running a **22-week (5-month) English listening + speaking improvement plan**. This repo exists to produce custom AI Infra audio teaching material for that plan: every 2–3 weeks the user adds one new AI Infra article and runs the full pipeline → `merged.wav` + `subtitle.lrc` becomes their listening / shadowing material. Expected cadence: **8–10 new articles over the 22 weeks**.
 
-The full plan, including baseline test SOPs, the 5-phase week-by-week schedule, four practice SOPs (美剧 / 口语课 / AI Infra listening / recording review), and the Anki chunk-card template, lives at **[English-learn/English-learn.md](English-learn/English-learn.md)**. Reference materials (`reference-advice*.md`, `AI-infra-podcast.md`) sit alongside it.
+The full plan, including baseline test SOPs, the 5-phase week-by-week schedule, four practice SOPs (美剧 / 口语课 / AI Infra listening / recording review), and the Anki chunk-card template, lives at **[English-learn/English-learn.md](English-learn/English-learn.md)**. Source/reference material (`reference-advice*.md`, `AI-infra-podcast.md`, the 墨墨记忆卡 official-syntax docs) lives under `English-learn/references/`.
 
 What this means for working in this repo:
 
 - When the user asks for a new article, **prefer AI Infra topics** matching the plan (vLLM blog, KV cache, GPU scheduling, inference serving, etc.) over arbitrary tech writing.
 - When suggesting cadence or batch size for new articles, anchor on the plan: **one new article per 2–3 weeks**, not "let's add ten at once."
+- **Spaced-repetition workflow**: the user reviews in 墨墨记忆卡 (Markji), **daily** (one log + one card file per study day, not weekly batches). When they ask to "turn my learning log into cards", read `English-learn/log/day-NN.md` and emit Markji table-import TSV per the templates in `English-learn/cards/_templates.md`, writing to `English-learn/cards/day-NN.md`. `day-NN` = study-day sequence; the date is in the file's H1. The whole flow (问题发现 → 过程记录 → 整理成卡 → 复习) is specified in **[English-learn/review-workflow.md](English-learn/review-workflow.md)**. Core principle: every card carries the user's personal "错误场景" so review reactivates the moment they got it wrong. Styling lives in the template; data rows stay plain text.
 - Under `English-learn/`, only **audio recordings** are gitignored (`**/*.{m4a,wav,mp3}` — voice data + git binary-bloat, same spirit as `voices/` and `articles/*/audio/`). All **text** is tracked: the plan, reference advice, weekly logs, feedback, and Anki cards — so the user can version their learning progress. (This assumes the repo stays private; the text logs document their English practice.)
 - Voice-related decisions (which ref clip, which 美剧 to use, etc.) have already been made and recorded in the plan — defer to the plan rather than re-recommending from scratch.
 
@@ -92,7 +93,7 @@ No tests, no linter, no build step beyond `uv sync`.
 **`text/sentences.py`** — input is whatever's in `articles/<slug>/source.txt`. First-line detection: if it parses as a JSON-encoded string (the `playwright-cli --raw eval` output format), decode with `json.loads` before splitting; otherwise treat as plain text. Sentence splitter is regex + abbreviation whitelist (`Mr./e.g./No./Inc./…`); good for prose, doesn't handle code blocks. It also **won't split inside an unclosed parenthesis** (`candidate.count("(") > candidate.count(")")` → skip), so a parenthetical with internal sentence punctuation like `"(Error checking is really important! Don't skimp on it!)"` stays one sentence instead of breaking at the inner `!` and leaving a dangling `(`.
 
 **`tts/base.py` + backends** — Protocol with `synthesize(text, dest)`. Two implementations:
-- `tts/chatterbox.py` — local model, weights downloaded once to `.model-cache/chatterbox/` (5 files via `httpx.stream`, atomic via `.part` swap, respects `HF_ENDPOINT`). The critical design choice: **always pass the same `--ref` clip to every sentence** to prevent voice drift on autoregressive models (per voice.md §2). Writes IEEE_FLOAT 32-bit via `torchaudio.save`.
+- `tts/chatterbox.py` — local model, weights downloaded once to `.model-cache/chatterbox/` (5 files via `httpx.stream`, atomic via `.part` swap, respects `HF_ENDPOINT`). The critical design choice: **always pass the same `--ref` clip to every sentence** to prevent voice drift on autoregressive models. Writes IEEE_FLOAT 32-bit via `torchaudio.save`.
 - `tts/fish_audio.py` — Fish Audio API via `fish-audio-sdk` (`from fishaudio import FishAudio`). Two reference modes:
   1. `reference_id` — a voice clone model already saved in your fish.audio account. Fastest and most stable, recommended for long runs.
   2. Local wav file — uploaded inline as `ReferenceAudio(audio=bytes, text=transcript)`. The API requires a transcript for the reference clip; **`voice scrape` writes the kurobbs `content` field next to each wav as `<name>.transcript.txt`**, so for whole pure clips the transcript is free. If the transcript file is missing (e.g. a split fragment, or a non-kurobbs wav), the backend falls back to a one-time Fish ASR call and caches the result in the same `<name>.transcript.txt` path. Manual edits to that file are honored next run. Outputs PCM by default.
@@ -148,8 +149,9 @@ For Fish Audio TTS, the user has pre-uploaded three voice models and stored the 
 ## See also
 
 - [English-learn/English-learn.md](English-learn/English-learn.md) — **the 22-week English learning plan this project serves**. Read first when the user mentions article cadence, topic selection, or anything about listening / shadowing.
-- [English-learn/AI-infra-podcast.md](English-learn/AI-infra-podcast.md) — curated AI Infra podcast list mapped to listening phases 3–5 of the plan.
-- [voice.md](voice.md) — TTS model selection rationale, reference-audio prep, technical-term preprocessing advice. Read this before changing TTS engines or trying to improve output quality.
+- [English-learn/review-workflow.md](English-learn/review-workflow.md) — the 4-step spaced-repetition workflow (learning log → 墨墨记忆卡 TSV cards). Read when the user asks to record a mistake or generate flashcards. Templates live in `English-learn/cards/_templates.md`, daily-log format in `English-learn/log/_template.md`.
+- [English-learn/ai-chat-prompt.md](English-learn/ai-chat-prompt.md) — the system prompt the user runs in other AI tools to get tech help + English coaching; its "Chunk of the day" output feeds the review workflow.
+- [English-learn/references/AI-infra-podcast.md](English-learn/references/AI-infra-podcast.md) — curated AI Infra podcast list mapped to listening phases 3–5 of the plan.
 - [README.md](README.md) — user-facing setup + run instructions for the unified CLI, including the 5-minute quickstart.
 - [voice_labels.json](voice_labels.json) — per-character voice mode labels + Fish Audio `reference_id` registry.
 

@@ -405,7 +405,7 @@ uv run blog-voice article pipeline pytorch-internals \
 blog-voice/
 ├── pyproject.toml          # `blog-voice` CLI 入口注册在这里
 ├── voice_labels.json       # 角色音色人工标注（爱弥斯）
-├── voice.md                # TTS 选型 + 工程建议
+├── English-learn/          # 5 个月英语学习计划 + 复习流程 + 日志/卡片
 ├── src/blog_voice/
 │   ├── cli.py              # 总入口 (argparse 子命令)
 │   ├── paths.py            # ArticlePaths + ArticleMeta
@@ -440,5 +440,5 @@ blog-voice/
 - **TTS 输出格式不一致**：chatterbox 默认写 IEEE_FLOAT 32-bit，fish 默认 PCM；`article merge` 走 `soundfile` 统一读，输出 16-bit PCM。
 - **fish 后端的 ref 转录**：第一次用本地 wav 做参考会调用 fish ASR 转录中文台词、缓存在 `<ref>.transcript.txt`。ASR 不理想时可手工编辑这个文件。
 - **ZenMux 免费配额很紧**：跑全文规范化 / 增强 / 翻译（250 句 × 3 ≈ 750 次调用）可能就把 rolling window 耗光，会返回 HTTP 402 `quote_exceeded`。三者默认都用 `deepseek/*` 模型，配 `DEEPSEEK_API_KEY` 后自动兜底；音频校验（Gemini）没有兜底，撞了只能等配额刷新或升级 ZenMux 套餐。
-- **缩写/符号/版本号**：技术博客 TTS 最大的坑。现已由 `article normalize` 处理：把 `torch.mm`、下划线宏、下标 `[1, :]`、`.so`、`PyTorch`/`dtype` 这类 token 改写成可读形式（两种后端都用）。默认走"只修明确读错"的保守策略；想更激进地展开缩写 / 版本号（`API → A P I`、`v2.5.1 → version two point five point one`）可以加到 `text/normalize.py` 的 prompt 里。背景见 voice.md §3。
+- **缩写/符号/版本号**：技术博客 TTS 最大的坑。现已由 `article normalize` 处理：把 `torch.mm`、下划线宏、下标 `[1, :]`、`.so`、`PyTorch`/`dtype` 这类 token 改写成可读形式（两种后端都用）。默认走"只修明确读错"的保守策略；想更激进地展开缩写 / 版本号（`API → A P I`、`v2.5.1 → version two point five point one`）可以加到 `text/normalize.py` 的 prompt 里。
 - **copyright**：`voices/`、`voices_split/`、`articles/*/source.txt` / `sentences*.txt` / `audio/` / `merged.wav` / `subtitle.lrc` 等用户内容已 gitignore（看 `.gitignore`），不要推到公开仓库；只有 `meta.json` + `voice_labels.json` 这些"配置/标注"文件会被跟踪。
